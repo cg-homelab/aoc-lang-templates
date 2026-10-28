@@ -1,15 +1,15 @@
-# day-__DAY__ — zig
+# __NAME__
 
 build:
     zig build -Doptimize=ReleaseFast
 
 run part: build
-    ./zig-out/bin/day-__DAY__ {{part}}
+    ./zig-out/bin/__NAME__ {{part}}
 
 test:
     zig build test
 
 bench: build
     hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n 'day-__DAY__ zig part1' './zig-out/bin/day-__DAY__ 1' \
-        -n 'day-__DAY__ zig part2' './zig-out/bin/day-__DAY__ 2'
+        -n '__NAME__ part1' './zig-out/bin/__NAME__ 1' \
+        -n '__NAME__ part2' './zig-out/bin/__NAME__ 2'

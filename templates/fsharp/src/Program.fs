@@ -19,5 +19,5 @@ let main argv =
             Console.WriteLine answer
             0
     | _ ->
-        Console.Error.WriteLine "usage: day-__DAY__ <1|2>"
+        Console.Error.WriteLine "usage: __NAME__ <1|2>"
         1

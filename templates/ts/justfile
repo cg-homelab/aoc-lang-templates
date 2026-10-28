@@ -1,4 +1,4 @@
-# day-__DAY__ — typescript (bun)
+# __NAME__ (typescript, bun)
 
 build:
     bun build --compile --outfile solution main.ts
@@ -11,5 +11,5 @@ test:
 
 bench: build
     hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n 'day-__DAY__ ts part1' './solution 1' \
-        -n 'day-__DAY__ ts part2' './solution 2'
+        -n '__NAME__ part1' './solution 1' \
+        -n '__NAME__ part2' './solution 2'

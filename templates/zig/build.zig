@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("example2", .{ .root_source_file = b.path("example2.txt") });
 
     const exe = b.addExecutable(.{
-        .name = "day-__DAY__",
+        .name = "__NAME__",
         .root_module = mod,
     });
     b.installArtifact(exe);

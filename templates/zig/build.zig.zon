@@ -1,7 +1,7 @@
 .{
     // Shared by every day: the manifest name must be a bare Zig identifier
-    // (no '-') and the fingerprint is derived from it, so the day number
-    // lives in build.zig (executable name) rather than here.
+    // (no '-') and the fingerprint is derived from it, so the day's
+    // directory name lives in build.zig (executable name) rather than here.
     .name = .aoc,
     .version = "0.1.0",
     .fingerprint = 0x808a3f8f5a1d0c0d, // Changing this has security and trust implications.

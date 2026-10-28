@@ -48,7 +48,7 @@ jobs:
       - name: Set paths
         run: |
           echo "YEAR=$RUNNER_TEMP/year" >> "$GITHUB_ENV"
-          echo "DAY=$RUNNER_TEMP/year/days/day-01" >> "$GITHUB_ENV"
+          echo "DAY=$RUNNER_TEMP/year/days/day-01-${{ matrix.lang }}-v1" >> "$GITHUB_ENV"
 
       - name: Set up toolchains
         uses: ./.github/actions/setup-toolchains
