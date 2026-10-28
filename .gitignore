@@ -22,6 +22,8 @@
 /templates/**/TestResults/
 /templates/**/.zig-cache/
 /templates/**/zig-out/
+# mlugg/setup-zig points ZIG_GLOBAL_CACHE_DIR and ZIG_LOCAL_CACHE_DIR at the workspace root
+/.zig-cache/
 
 # macOS
 .DS_Store
