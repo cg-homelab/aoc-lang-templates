@@ -1,0 +1,8 @@
+[project]
+name = "day-__DAY__"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]

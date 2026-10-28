@@ -1,0 +1,15 @@
+# day-__DAY__ — typescript (bun)
+
+build:
+    bun build --compile --outfile solution main.ts
+
+run part:
+    bun main.ts {{part}}
+
+test:
+    bun test
+
+bench: build
+    hyperfine -N --warmup 3 --export-markdown bench.md \
+        -n 'day-__DAY__ ts part1' './solution 1' \
+        -n 'day-__DAY__ ts part2' './solution 2'

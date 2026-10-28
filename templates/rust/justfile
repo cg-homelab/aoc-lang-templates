@@ -1,0 +1,15 @@
+# day-__DAY__ — rust
+
+build:
+    cargo build --release --quiet
+
+run part:
+    cargo run --release --quiet -- {{part}}
+
+test:
+    cargo test --quiet
+
+bench: build
+    hyperfine -N --warmup 3 --export-markdown bench.md \
+        -n 'day-__DAY__ rust part1' './target/release/day-__DAY__ 1' \
+        -n 'day-__DAY__ rust part2' './target/release/day-__DAY__ 2'

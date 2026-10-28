@@ -1,0 +1,84 @@
+name: Set up AoC toolchains
+description: >-
+  Install just, hyperfine and the toolchain for one language template
+  (or every template with lang: all).
+
+inputs:
+  lang:
+    description: "Template language (rust, go, python, ts, php, csharp, fsharp, zig) or 'all'"
+    required: false
+    default: all
+
+runs:
+  using: composite
+  steps:
+    - name: Validate lang input
+      shell: bash
+      env:
+        AOC_LANG: ${{ inputs.lang }}
+      run: |
+        case "$AOC_LANG" in
+          all|rust|go|python|ts|php|csharp|fsharp|zig) ;;
+          *)
+            echo "::error::setup-toolchains: unknown lang '$AOC_LANG' (expected all, rust, go, python, ts, php, csharp, fsharp or zig)"
+            exit 1
+            ;;
+        esac
+
+    - name: Install just and hyperfine
+      uses: taiki-e/install-action@v2
+      with:
+        tool: just,hyperfine
+
+    - name: Set up Rust
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'rust' }}
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Set up Go
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'go' }}
+      uses: actions/setup-go@v7
+      with:
+        go-version: stable
+        cache: false
+
+    - name: Set up uv
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'python' }}
+      uses: astral-sh/setup-uv@v10
+
+    - name: Set up Bun
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'ts' }}
+      uses: oven-sh/setup-bun@v2
+
+    - name: Set up PHP
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'php' }}
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: "8.3"
+
+    # Composite actions cannot set job-level env, so export via GITHUB_ENV.
+    - name: Configure .NET environment
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'csharp' || inputs.lang == 'fsharp' }}
+      shell: bash
+      run: |
+        {
+          echo "DOTNET_CLI_TELEMETRY_OPTOUT=1"
+          echo "DOTNET_NOLOGO=1"
+          echo "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"
+        } >> "$GITHUB_ENV"
+
+    - name: Set up .NET
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'csharp' || inputs.lang == 'fsharp' }}
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Install Native AOT prerequisites
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'csharp' || inputs.lang == 'fsharp' }}
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+    - name: Set up Zig
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'zig' }}
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.17.0

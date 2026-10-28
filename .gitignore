@@ -1,0 +1,27 @@
+# Per-day files from running a template in place: never commit a puzzle
+# input to this public repo (and the fallback copy would spread it).
+/templates/*/input.txt
+/templates/*/bench.md
+
+# Build artifacts from building a template in place
+/templates/**/Cargo.lock
+/templates/**/uv.lock
+/templates/**/target/
+/templates/**/node_modules/
+/templates/**/.venv/
+/templates/**/__pycache__/
+/scripts/__pycache__/
+/templates/**/*.pyc
+/templates/**/.pytest_cache/
+/templates/*/solution
+
+# .NET / Zig build artifacts
+/templates/**/bin/
+/templates/**/obj/
+/templates/**/out/
+/templates/**/TestResults/
+/templates/**/.zig-cache/
+/templates/**/zig-out/
+
+# macOS
+.DS_Store

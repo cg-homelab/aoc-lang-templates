@@ -1,0 +1,13 @@
+# Empty workspace table keeps this crate standalone even if a parent
+# directory happens to contain a cargo workspace.
+[workspace]
+
+[package]
+name = "day-__DAY__"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.release]
+lto = true

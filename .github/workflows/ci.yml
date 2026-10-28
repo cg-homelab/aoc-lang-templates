@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:00 UTC: catch toolchain churn (Zig, .NET, ...) without a push
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Byte-compile scripts
+        run: python3 -m py_compile scripts/*.py
+
+  # Scaffolds day 1 from each template into a scratch year dir and checks the
+  # per-day contract: test passes, run prints the placeholder answers, bench
+  # writes bench.md.
+  validate:
+    name: template (${{ matrix.lang }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [rust, go, python, ts, php, csharp, fsharp, zig]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # Scratch year repo outside the checkout (runner context is not
+      # available in job-level env).
+      - name: Set paths
+        run: |
+          echo "YEAR=$RUNNER_TEMP/year" >> "$GITHUB_ENV"
+          echo "DAY=$RUNNER_TEMP/year/days/day-01" >> "$GITHUB_ENV"
+
+      - name: Set up toolchains
+        uses: ./.github/actions/setup-toolchains
+        with:
+          lang: ${{ matrix.lang }}
+
+      - name: Scaffold day 1
+        run: python3 "$GITHUB_WORKSPACE/scripts/new_day.py" --root "$YEAR" 1 ${{ matrix.lang }}
+
+      - name: Write sample input
+        run: printf 'foo\nbar\nbaz\n' > "$DAY/input.txt"
+
+      # `just --justfile` runs recipes with the justfile's directory as cwd.
+      - name: Test
+        run: just --justfile "$DAY/justfile" test
+
+      - name: Run part 1 and part 2
+        run: |
+          set -euo pipefail
+          p1="$(just --justfile "$DAY/justfile" run 1 2>/dev/null)"
+          p2="$(just --justfile "$DAY/justfile" run 2 2>/dev/null)"
+          echo "part1=[$p1] part2=[$p2]"
+          [ "$p1" = "3" ] || { echo "part 1: expected 3, got '$p1'" >&2; exit 1; }
+          [ "$p2" = "9" ] || { echo "part 2: expected 9, got '$p2'" >&2; exit 1; }
+
+      - name: Benchmark
+        run: |
+          set -euo pipefail
+          just --justfile "$DAY/justfile" bench
+          test -f "$DAY/bench.md"
+
+      - name: Templates stayed clean
+        run: |
+          status="$(git -C "$GITHUB_WORKSPACE" status --porcelain)"
+          if [ -n "$status" ]; then
+            echo "scaffolding modified the repo checkout:" >&2
+            echo "$status" >&2
+            exit 1
+          fi

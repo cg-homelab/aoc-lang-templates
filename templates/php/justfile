@@ -1,0 +1,15 @@
+# day-__DAY__ — php
+
+build:
+    @echo "nothing to build"
+
+run part:
+    php main.php {{part}}
+
+test:
+    php test.php
+
+bench:
+    hyperfine -N --warmup 3 --export-markdown bench.md \
+        -n 'day-__DAY__ php part1' 'php main.php 1' \
+        -n 'day-__DAY__ php part2' 'php main.php 2'

@@ -1,0 +1,15 @@
+# day-__DAY__ — go
+
+build:
+    go build -o solution .
+
+run part:
+    go run . {{part}}
+
+test:
+    go test ./...
+
+bench: build
+    hyperfine -N --warmup 3 --export-markdown bench.md \
+        -n 'day-__DAY__ go part1' './solution 1' \
+        -n 'day-__DAY__ go part2' './solution 2'

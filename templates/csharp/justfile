@@ -1,0 +1,15 @@
+# day-__DAY__ — csharp (.NET 10; bench uses a Native AOT publish)
+
+build:
+    dotnet publish src -c Release -o out
+
+run part:
+    dotnet run --project src -c Release -- {{part}}
+
+test:
+    dotnet test tests
+
+bench: build
+    hyperfine -N --warmup 3 --export-markdown bench.md \
+        -n 'day-__DAY__ csharp part1' './out/day-__DAY__ 1' \
+        -n 'day-__DAY__ csharp part2' './out/day-__DAY__ 2'

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Day__DAY__.Tests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Skip the test platform's localized resource folders in bin/. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../src/Day__DAY__.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Example inputs live at the day root; copy them next to the test binary
+         so tests can read them via AppContext.BaseDirectory. -->
+    <None Include="../example1.txt" Link="example1.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../example2.txt" Link="example2.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same package set as `dotnet new xunit` on the .NET 10 SDK: runs under
+         `dotnet test` with no extra configuration. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>
