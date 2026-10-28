@@ -43,7 +43,7 @@ runs:
 
     - name: Set up uv
       if: ${{ inputs.lang == 'all' || inputs.lang == 'python' }}
-      uses: astral-sh/setup-uv@v10
+      uses: astral-sh/setup-uv@v7
 
     - name: Set up Bun
       if: ${{ inputs.lang == 'all' || inputs.lang == 'ts' }}
