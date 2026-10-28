@@ -7,7 +7,7 @@ use std::{env, fs};
 fn main() -> ExitCode {
     let part = env::args().nth(1).unwrap_or_default();
     if part != "1" && part != "2" {
-        eprintln!("usage: day-__DAY__ <1|2>");
+        eprintln!("usage: __NAME__ <1|2>");
         return ExitCode::FAILURE;
     }
     let Ok(input) = fs::read_to_string("input.txt") else {

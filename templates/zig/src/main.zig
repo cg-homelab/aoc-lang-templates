@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !u8 {
     else if (std.mem.eql(u8, part, "2"))
         &part2.process
     else {
-        std.debug.print("usage: day-__DAY__ <1|2>\n", .{});
+        std.debug.print("usage: __NAME__ <1|2>\n", .{});
         return 1;
     };
 

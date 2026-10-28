@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"os"
 
-	"day-__DAY__/part1"
-	"day-__DAY__/part2"
+	"__NAME__/part1"
+	"__NAME__/part2"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: day-__DAY__ <1|2>")
+		fmt.Fprintln(os.Stderr, "usage: __NAME__ <1|2>")
 		os.Exit(1)
 	}
 
@@ -26,7 +26,7 @@ func main() {
 	case "2":
 		fmt.Println(part2.Process(string(input)))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: day-__DAY__ <1|2>")
+		fmt.Fprintln(os.Stderr, "usage: __NAME__ <1|2>")
 		os.Exit(1)
 	}
 }

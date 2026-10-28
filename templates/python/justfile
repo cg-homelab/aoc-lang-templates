@@ -1,4 +1,4 @@
-# day-__DAY__ — python (uv)
+# __NAME__ (uv)
 
 build:
     uv sync --quiet
@@ -12,5 +12,5 @@ test: build
 # Benches the venv python directly — no uv wrapper overhead in the numbers.
 bench: build
     hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n 'day-__DAY__ python part1' '.venv/bin/python main.py 1' \
-        -n 'day-__DAY__ python part2' '.venv/bin/python main.py 2'
+        -n '__NAME__ part1' '.venv/bin/python main.py 1' \
+        -n '__NAME__ part2' '.venv/bin/python main.py 2'

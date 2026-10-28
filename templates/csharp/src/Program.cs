@@ -2,7 +2,7 @@ using Day__DAY__;
 
 if (args.Length != 1 || (args[0] != "1" && args[0] != "2"))
 {
-    Console.Error.WriteLine("usage: day-__DAY__ <1|2>");
+    Console.Error.WriteLine("usage: __NAME__ <1|2>");
     return 1;
 }
 

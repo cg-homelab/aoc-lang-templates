@@ -1,3 +1,3 @@
-module day-__DAY__
+module __NAME__
 
 go 1.23

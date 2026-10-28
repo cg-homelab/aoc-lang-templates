@@ -1,4 +1,4 @@
-# day-__DAY__ — fsharp (.NET 10; bench uses a Native AOT publish)
+# __NAME__ (.NET 10; bench uses a Native AOT publish)
 
 build:
     dotnet publish src -c Release -o out
@@ -11,5 +11,5 @@ test:
 
 bench: build
     hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n 'day-__DAY__ fsharp part1' './out/day-__DAY__ 1' \
-        -n 'day-__DAY__ fsharp part2' './out/day-__DAY__ 2'
+        -n '__NAME__ part1' './out/__NAME__ 1' \
+        -n '__NAME__ part2' './out/__NAME__ 2'
