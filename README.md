@@ -138,11 +138,15 @@ installs the .NET Native AOT prerequisites with `apt-get`), so use it on
 
 ## Releases
 
-Releases are semver tags (`v1.0.0`). A breaking change to the per-day
-contract or to `new_day.py`'s interface bumps the major version. Year repos
-pin a tag in their submodule. Dependabot's `gitsubmodule` ecosystem can open
-bump PRs, but it moves the submodule to the head of its tracked branch rather
-than to the newest tag, so review those against the release notes.
+Releases are semver tags (`v1.0.0`), created automatically by the Release
+workflow when a PR merges to main. The bump comes from the PR label
+`release/major`, `release/minor` or `release/patch`, and is a patch when the PR
+is unlabeled. `release/skip` merges without creating a tag. A breaking change
+to the per-day contract or to `new_day.py`'s interface must carry
+`release/major`. Year repos pin a tag in their submodule. Dependabot's
+`gitsubmodule` ecosystem can open bump PRs, but it moves the submodule to the
+head of its tracked branch rather than to the newest tag, so review those
+against the release notes.
 
 **v2.0.0 is breaking for consumers.** Solutions are scaffolded into
 `days/day-NN-<lang>-vN` instead of `days/day-NN`, the templates use the new
