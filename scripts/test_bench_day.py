@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
@@ -221,6 +223,127 @@ class WriteJsonTest(unittest.TestCase):
                     self.assertEqual(json.loads(path.read_text()), {"schema": 1})
             self.assertEqual(os.listdir(tmp), ["bench.json"])
 
+    def test_write_text_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "benchmarks.md"
+            path.write_text("old\r\n")
+            bd.write_text_atomic(path, "# Benchmarks\n\n| µ |\n")
+            self.assertEqual(path.read_bytes(), "# Benchmarks\n\n| µ |\n".encode())
+            self.assertEqual(os.listdir(tmp), ["benchmarks.md"])
+            (Path(tmp) / "dir").mkdir()
+            with self.assertRaises(OSError):
+                bd.write_text_atomic(Path(tmp) / "dir", "x")  # replace onto a directory fails
+            self.assertEqual(sorted(os.listdir(tmp)), ["benchmarks.md", "dir"])  # no temp file left
+
+    def test_sort_keys_and_newlines(self) -> None:
+        data = {"solutions": {"b": 1, "a": "µ"}, "schema": 1}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "out.json"
+            bd.write_json_atomic(path, data, sort_keys=True)
+            raw = path.read_bytes()
+            self.assertEqual(raw, '{\n  "schema": 1,\n  "solutions": {\n    "a": "µ",\n    "b": 1\n  }\n}\n'.encode())
+            bd.write_json_atomic(path, data)  # default: insertion order
+            raw = path.read_bytes()
+            self.assertNotIn(b"\r", raw)
+            self.assertLess(raw.index(b'"solutions"'), raw.index(b'"schema"'))
+            self.assertLess(raw.index(b'"b"'), raw.index(b'"a"'))
+
+
+GIT = shutil.which("git")
+
+
+@unittest.skipIf(GIT is None, "git is not on PATH")
+class GitCommitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+        # Never let git find a repo above the scratch directory (e.g. a TMPDIR inside a checkout).
+        env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})
+        env.start()
+        self.addCleanup(env.stop)  # also restores the variables popped below
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            os.environ.pop(key, None)
+
+    def git(self, repo: Path, *args: str) -> str:
+        cmd = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false",
+               "-c", "init.defaultBranch=main", *args]
+        return subprocess.run(cmd, cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def repo(self) -> Path:
+        repo = self.tmp / "year"
+        (repo / "days" / "day-01-rust-v1").mkdir(parents=True)
+        self.git(repo, "init", "-q")
+        (repo / ".gitignore").write_text("input.txt\n")
+        (repo / "days" / "day-01-rust-v1" / "main.rs").write_text("fn main() {}\n")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "init")
+        return repo
+
+    def test_clean(self) -> None:
+        repo = self.repo()
+        sol = repo / "days" / "day-01-rust-v1"
+        head = self.git(repo, "rev-parse", "--short", "HEAD")
+        self.assertRegex(head, r"^[0-9a-f]{7,}$")
+        self.assertEqual(bd.git_commit(sol), head)
+        # Untracked and ignored files never make the tree dirty.
+        (sol / "input.txt").write_text("puzzle\n")
+        (sol / "bench.json").write_text("{}\n")
+        self.assertEqual(bd.git_commit(sol), head)
+
+    def test_dirty(self) -> None:
+        repo = self.repo()
+        sol = repo / "days" / "day-01-rust-v1"
+        (sol / "main.rs").write_text("fn main() { println!(); }\n")
+        head = self.git(repo, "rev-parse", "--short", "HEAD")
+        self.assertEqual(bd.git_commit(sol), f"{head} (dirty)")
+
+    def test_generated_files_are_not_dirty(self) -> None:
+        repo = self.repo()
+        sol = repo / "days" / "day-01-rust-v1"
+        (repo / "benchmarks.md").write_text("# Benchmarks\n")
+        (repo / "benchmarks.json").write_text("{}\n")
+        (sol / "benchmarks.md").write_text("not generated\n")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "benchmarks")
+        head = self.git(repo, "rev-parse", "--short", "HEAD")
+        # Rewritten by collect_benches.py after a bench: still clean.
+        (repo / "benchmarks.md").write_text("# Benchmarks\n\nnew\n")
+        (repo / "benchmarks.json").write_text('{"schema": 1}\n')
+        self.assertEqual(bd.git_commit(sol), head)
+        self.assertEqual(bd.git_commit(repo), head)
+        # The exclusion is anchored at the repo root: a nested benchmarks.md counts.
+        (sol / "benchmarks.md").write_text("changed\n")
+        self.assertEqual(bd.git_commit(sol), f"{head} (dirty)")
+        self.git(repo, "checkout", "--", "days")
+        self.assertEqual(bd.git_commit(sol), head)
+        # Any other tracked file counts.
+        (sol / "main.rs").write_text("fn main() { println!(); }\n")
+        self.assertEqual(bd.git_commit(sol), f"{head} (dirty)")
+
+    def test_outside_a_repo(self) -> None:
+        outside = self.tmp / "plain"
+        outside.mkdir()
+        self.assertIsNone(bd.git_commit(outside))
+
+    def test_repo_without_commits(self) -> None:
+        repo = self.tmp / "empty"
+        repo.mkdir()
+        self.git(repo, "init", "-q")
+        self.assertIsNone(bd.git_commit(repo))
+
+
+class EnvironmentTest(unittest.TestCase):
+    def test_git_missing(self) -> None:
+        with mock.patch.object(bd.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertIsNone(bd.git_commit(Path.cwd()))
+
+    def test_cpu_and_os_names(self) -> None:
+        for value in (bd.cpu_name(), bd.os_name()):
+            self.assertIsInstance(value, str)
+            self.assertTrue(value.strip())
+        self.assertRegex(bd.os_name(), r"\(.+\)$")
+
 
 class ParseTest(unittest.TestCase):
     def parse(self, stdout: str, part: int = 1, iterations: int = 3) -> dict[str, object]:
@@ -348,13 +471,21 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         data = self.bench_json()
         self.assertEqual(
-            sorted(data), ["benched_at", "command", "input", "name", "parts", "schema", "settings"]
+            sorted(data),
+            ["benched_at", "command", "commit", "input", "name", "parts", "schema", "settings", "system"],
         )
         self.assertEqual(data["schema"], 1)
         self.assertEqual(data["name"], "day-01-fake-v1")  # defaults to the cwd name
         self.assertEqual(data["command"], [sys.executable, str(FAKE)])
         self.assertEqual(data["input"], "input.txt")
         self.assertRegex(data["benched_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        # The scrubbed PATH hides git, so commit is normally null here; either way it has this shape.
+        commit = data["commit"]
+        self.assertTrue(commit is None or re.fullmatch(r"[0-9a-f]{7,}( \(dirty\))?", commit), commit)
+        self.assertEqual(sorted(data["system"]), ["cpu", "os"])
+        for key in ("cpu", "os"):
+            self.assertIsInstance(data["system"][key], str)
+            self.assertTrue(data["system"][key].strip(), data["system"])
         self.assertEqual(data["settings"], {"time": 2e-05, "min_iterations": 10, "max_iterations": 100000})
         parts = data["parts"]
         self.assertEqual([p["part"] for p in parts], [1, 2])
@@ -424,7 +555,7 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(self.hyperfine_calls(), [])
         self.assertNotIn("hyperfine", r.stderr)
         self.assertIn("note: --input example1.txt: the result goes to bench.json, but collect_benches.py "
-                      "will not merge it into benchmarks.md", r.stderr)
+                      "will not merge it into benchmarks.json", r.stderr)
         self.assertEqual(self.bench_json()["input"], "example1.txt")
 
     def test_missing_or_empty_input(self) -> None:

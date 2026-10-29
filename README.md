@@ -15,7 +15,7 @@ Languages: `rust`, `go`, `python`, `ts`, `php`, `csharp`, `fsharp`, `zig`
 templates/<lang>/                      one directory per language template
 scripts/new_day.py                     scaffolds days/day-NN-<lang>-vN from a template
 scripts/resolve_day.py                 resolves a day number or solution name to its directories
-scripts/collect_benches.py             merges every day's bench.json into benchmarks.md
+scripts/collect_benches.py             merges every day's bench.json into benchmarks.json and renders benchmarks.md
 scripts/bench_day.py                   in-process benchmark driver behind `just bench`
 .github/actions/setup-toolchains/      composite action: just, hyperfine and per-language toolchains
 ```
@@ -108,7 +108,7 @@ flags:
 | `--min-iterations N`, `--max-iterations N` | Clamp for the iteration count (defaults 10 and 100000) |
 | `--iterations N` | Fixed iteration count, skips calibration |
 | `--warmup K` | Fixed number of discarded warmup iterations |
-| `--input FILE` | Time against another input (skips the run-mode check and hyperfine). The result is written to `bench.json`, but `collect_benches.py` does not merge runs made with another input into `benchmarks.md` (the previous section is kept); re-run `just bench` without `--input` to refresh |
+| `--input FILE` | Time against another input (skips the run-mode check and hyperfine). The result is written to `bench.json`, but `collect_benches.py` does not merge runs made with another input into `benchmarks.json` (the existing entry in `benchmarks.json` is kept); re-run `just bench` without `--input` to refresh |
 | `--no-hyperfine` | Skip the whole-process wall time |
 | `--json-out FILE` | Where to write the summary (default `bench.json`) |
 
@@ -153,7 +153,7 @@ or directory names:
 
 | Token | Replaced with | Use it for |
 |---|---|---|
-| `__NAME__` | the solution directory name, e.g. `day-01-rust-v1` | package/module/project names, binary names and paths, usage strings, justfile header and the bench driver's `--name`, so every solution is unique in `benchmarks.md` |
+| `__NAME__` | the solution directory name, e.g. `day-01-rust-v1` | package/module/project names, binary names and paths, usage strings, justfile header and the bench driver's `--name`, so every solution is unique in `benchmarks.json` / `benchmarks.md` |
 | `__DAY__` | the zero-padded day number, `01` to `25` | identifiers that cannot contain `-`, such as the C#/F# `Day__DAY__` namespaces, modules and project/solution file names |
 
 Only git-tracked template files are copied, so local build artifacts never
@@ -203,6 +203,67 @@ that prints the usage line and exits 1.
 
 `resolve_day.py` and `collect_benches.py` are called from the year repo root
 and use the current directory as the root (`--root <dir>` to override).
+
+### benchmarks.md
+
+`collect_benches.py [--root DIR] [--tablemode {single,ranking}]` merges every
+`days/day-NN-<lang>-vN/bench.json` into `benchmarks.json` at the year repo
+root and renders `benchmarks.md` from it. `just bench` and `just bench-all`
+run it after benchmarking; `just benchmarks` runs it without benchmarking.
+
+`benchmarks.json` is the committed source of truth. It holds one entry per
+solution with the timings of both parts, the date it was benched, and the CPU,
+OS and commit it was benched on (`bench_day.py` records `system` and `commit`
+in `bench.json`; `(dirty)` after the commit means tracked files other than
+`benchmarks.json` / `benchmarks.md` had uncommitted changes). Puzzle answers
+are stripped. `benchmarks.md` is generated from it, so it can be rebuilt at
+any time, even on a fresh clone without any `bench.json`.
+
+The table layout is the tablemode, `single` by default. `single` renders one
+table under `## Results`, ordered by day, part and in-process median:
+
+```
+| Day | Part | Rank | Solution | Median | ×fastest | Min | Mean ± σ | p99 | Iterations | Peak RSS Δ | Wall (hyperfine) |
+```
+
+`ranking` renders one table per day and part under `## Day NN, part P`:
+
+```
+| Rank | Solution | Median | ×fastest | Min | Mean ± σ | p99 | Iterations | Peak RSS Δ | Wall (hyperfine) |
+```
+
+Rank and `×fastest` compare medians within one day and part, and equal
+medians share a rank. Both modes end with a `## Runs` section with one bullet
+per solution:
+
+```
+- `day-01-rust-v1`: benchmarked 2026-10-29 on AMD Ryzen 9 3900X 12-Core Processor, Linux 7.3.0-4-cachyos (x86_64), commit 41e9bc8 (dirty)
+```
+
+The year repo's justfile has a `tablemode := "single"` variable that `bench`
+and `bench-all` pass as `--tablemode`. Override it per run with
+`just tablemode=ranking bench 3`. `just benchmarks [single|ranking]` runs
+the same merge as `bench` (it picks up any newer local `bench.json`, drops
+entries whose directory is gone and fills `system`/`commit` for v3
+`bench.json` files) and then renders `benchmarks.md`; the only difference is
+that it does not benchmark anything.
+
+Merge rules:
+
+- An entry is replaced only when the `bench.json`'s `benched_at` is later than
+  the entry's.
+- An entry whose `days/<name>` directory is gone is dropped.
+- A missing `bench.json` (it is gitignored, so a fresh clone has none) keeps
+  the entry.
+- An invalid `bench.json` (unreadable, not JSON, wrong schema, malformed
+  numbers) prints a warning and keeps the entry.
+- Runs made with a non-default `--input` are not merged, so the existing entry
+  is kept.
+- A `bench.json` from lang-templates v3 has no `system`/`commit`; they are
+  filled from the machine and commit running the merge.
+- `just bench-all` rebuilds every entry whose bench succeeded.
+- A corrupt `benchmarks.json` makes the script exit 1 without writing
+  anything.
 
 After cloning a year repo, run `git submodule update --init` if
 `lang-templates/` is empty.
@@ -255,6 +316,15 @@ longer recognises plain `days/day-NN` directories. Year repos on the old
 layout either stay on a v1.x tag or rename each `days/day-NN` once (for
 example to `days/day-NN-<lang>-v1`) and update anything that refers to the
 old paths, such as the year repo's justfile.
+
+**v4.0.0 is breaking for consumers.** `collect_benches.py` keeps its results in
+a committed `benchmarks.json` and renders `benchmarks.md` from it, in either
+the `single` or the `ranking` table layout (see [benchmarks.md](#benchmarksmd)),
+so the per-solution `## day-NN-...` sections are gone. Sections written by v3
+hold only formatted numbers and cannot be imported. Year repos must add the
+`tablemode := "single"` variable and the `benchmarks` recipe to their root
+justfile, pass `--tablemode` from `bench` and `bench-all`, run
+`just bench-all` once, and commit `benchmarks.json`.
 
 **v3.0.0 is breaking for consumers.** `just bench` writes `bench.json` through
 `bench_day.py` instead of hyperfine's `bench.md`, so every solution executable

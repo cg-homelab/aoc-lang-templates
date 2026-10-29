@@ -22,8 +22,11 @@ measured run takes about --time seconds (clamped to [--min-iterations,
 runs `<cmd> bench <part> <input> N+K`, drops the warmup samples and
 summarises the rest. With hyperfine on PATH (and the default
 --input, without --no-hyperfine) it also records hyperfine's whole-process
-wall time of `<cmd> <part>`. The summary is written atomically to bench.json
-and printed as a markdown table.
+wall time of `<cmd> <part>`. The summary, with the machine (`system`: CPU and
+OS) and the year repo's `commit` (short hash, `(dirty)` when tracked files are
+modified, null outside a git repo), is written atomically to bench.json and
+printed as a markdown table. collect_benches.py merges bench.json files into
+the year repo's benchmarks.json / benchmarks.md.
 
 Exit status: 0 ok, 1 usage, 2 solution failed, 3 protocol violation,
 4 answer mismatch. Errors are `error: ...` lines on stderr.
@@ -35,6 +38,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import shlex
 import shutil
 import statistics
@@ -338,19 +342,84 @@ def hyperfine_wall(cmd: list[str], part: int) -> dict[str, Any] | None:
             pass
 
 
+# --- run environment -------------------------------------------------------
+
+
+def _capture(cmd: list[str], cwd: Path | None = None) -> str:
+    """stdout of cmd, stripped; raise OSError / CalledProcessError on failure."""
+    return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=True).stdout.strip()
+
+
+def cpu_name() -> str:
+    """Best-effort CPU model name."""
+    try:
+        if platform.system() == "Darwin":
+            name = _capture(["sysctl", "-n", "machdep.cpu.brand_string"])
+            if name:
+                return name
+        elif platform.system() == "Linux":
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return platform.processor() or platform.machine() or "unknown CPU"
+
+
+def os_name() -> str:
+    """OS name, version and architecture, e.g. `Linux 6.8.0 (x86_64)`, `macOS 14.5 (arm64)`."""
+    system = platform.system() or "unknown OS"
+    if system == "Darwin":
+        system, version = "macOS", platform.mac_ver()[0]
+    else:
+        version = platform.release()
+    parts = f"{system} {version}".strip()
+    return f"{parts} ({platform.machine() or 'unknown'})"
+
+
+# Files collect_benches.py regenerates at the repo root: modifying them is not "dirty".
+GENERATED_PATHSPECS = (":(top,exclude)benchmarks.json", ":(top,exclude)benchmarks.md")
+
+
+def git_commit(directory: Path | None = None) -> str | None:
+    """Short HEAD hash of the repo containing directory, `<hash> (dirty)` when tracked files
+    are modified, None when git fails or there is no repo/commit.
+
+    Untracked and ignored files never count, nor do the generated benchmarks.json /
+    benchmarks.md at the repo root (otherwise every bench after the first would be dirty).
+    Exclude-only pathspecs match everything else, including a submodule pointer.
+    """
+    try:
+        commit = _capture(["git", "rev-parse", "--short", "HEAD"], directory)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not commit:
+        return None
+    try:
+        dirty = bool(_capture(["git", "status", "--porcelain", "--untracked-files=no", "--",
+                               *GENERATED_PATHSPECS], directory))
+    except (OSError, subprocess.SubprocessError):
+        dirty = False
+    return f"{commit} (dirty)" if dirty else commit
+
+
+# --- output ----------------------------------------------------------------
+
+
 def _umask() -> int:
     old = os.umask(0)
     os.umask(old)
     return old
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write text as UTF-8 with `\n` line endings (on every OS), atomically, with umask permissions."""
     path = path.absolute()
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
         os.chmod(tmp, 0o666 & ~_umask())  # mkstemp creates 0600; give it normal permissions
         os.replace(tmp, path)
     except BaseException:
@@ -359,6 +428,11 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def write_json_atomic(path: Path, data: dict[str, Any], sort_keys: bool = False) -> None:
+    """Write data as indented UTF-8 JSON plus a trailing newline, atomically (see write_text_atomic)."""
+    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False, sort_keys=sort_keys) + "\n")
 
 
 def _fmt_seconds(s: float) -> str:
@@ -506,7 +580,7 @@ def run(argv: list[str]) -> int:
     default_input = args.input == DEFAULT_INPUT
     if not default_input:
         print(f"note: --input {args.input}: the result goes to {args.json_out}, but collect_benches.py "
-              "will not merge it into benchmarks.md", file=sys.stderr)
+              "will not merge it into benchmarks.json", file=sys.stderr)
     use_hyperfine = False
     if default_input and not args.no_hyperfine:
         if shutil.which("hyperfine"):
@@ -521,6 +595,8 @@ def run(argv: list[str]) -> int:
         "command": cmd,
         "input": args.input,
         "benched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "system": {"cpu": cpu_name(), "os": os_name()},
+        "commit": git_commit(Path.cwd()),
         "settings": {
             "time": args.time,
             "min_iterations": args.min_iterations,
