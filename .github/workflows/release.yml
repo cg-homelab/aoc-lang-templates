@@ -1,0 +1,16 @@
+# Tags a semver release (vX.Y.Z) on every push to main. The bump level is
+# computed from the merged PR's release/* label (patch when unlabeled); see the
+# cg-homelab/workflows README for the full rules.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  tag:
+    uses: cg-homelab/workflows/.github/workflows/semver-tag.yml@v1.0.0

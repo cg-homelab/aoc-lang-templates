@@ -1,0 +1,12 @@
+name: Release label check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: cg-homelab/workflows/.github/workflows/release-label-check.yml@v1.0.0
