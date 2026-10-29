@@ -1,3 +1,4 @@
+mod bench;
 mod part1;
 mod part2;
 
@@ -5,7 +6,11 @@ use std::process::ExitCode;
 use std::{env, fs};
 
 fn main() -> ExitCode {
-    let part = env::args().nth(1).unwrap_or_default();
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("bench") {
+        return bench::run(&args[2..]);
+    }
+    let part = args.get(1).cloned().unwrap_or_default();
     if part != "1" && part != "2" {
         eprintln!("usage: __NAME__ <1|2>");
         return ExitCode::FAILURE;

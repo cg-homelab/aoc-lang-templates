@@ -2,6 +2,7 @@
 # input to this public repo (and the fallback copy would spread it).
 /templates/*/input.txt
 /templates/*/bench.md
+/templates/*/bench.json
 
 # Build artifacts from building a template in place
 /templates/**/Cargo.lock

@@ -49,7 +49,7 @@ ARTIFACT_DIRS = (
 )
 # Skipped by the fallback copy: build output plus per-day files that must
 # never be carried over from a template that was run in place.
-FALLBACK_IGNORE = (*ARTIFACT_DIRS, "input.txt", "bench.md", "solution")
+FALLBACK_IGNORE = (*ARTIFACT_DIRS, "input.txt", "bench.md", "bench.json", "solution")
 # Inherited from git hooks or `git submodule foreach`; they would point
 # `git ls-files` at another repository.
 GIT_ENV_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")

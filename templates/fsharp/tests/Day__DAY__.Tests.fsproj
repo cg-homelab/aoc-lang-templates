@@ -9,6 +9,7 @@
   <ItemGroup>
     <!-- No Program.fs needed: Microsoft.NET.Test.Sdk auto-generates the
          [<EntryPoint>] for F# test projects (GenerateProgramFile=true). -->
+    <Compile Include="BenchTests.fs" />
     <Compile Include="Tests.fs" />
   </ItemGroup>
 

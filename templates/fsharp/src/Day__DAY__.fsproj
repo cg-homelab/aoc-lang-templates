@@ -22,6 +22,7 @@
   <ItemGroup>
     <Compile Include="Part1.fs" />
     <Compile Include="Part2.fs" />
+    <Compile Include="Bench.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 </Project>

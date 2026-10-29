@@ -1,11 +1,15 @@
 import sys
 from pathlib import Path
 
+import bench
 from part1 import process as part1
 from part2 import process as part2
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["bench"]:
+        sys.exit(bench.main(sys.argv[2:]))
+
     part = sys.argv[1] if len(sys.argv) > 1 else ""
     if part not in ("1", "2"):
         sys.exit("usage: python main.py <1|2>")
