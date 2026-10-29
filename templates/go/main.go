@@ -14,6 +14,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if os.Args[1] == "bench" {
+		os.Exit(runBench(os.Args[2:]))
+	}
+
 	input, err := os.ReadFile("input.txt")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "input.txt missing — paste your puzzle input")

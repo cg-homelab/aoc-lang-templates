@@ -1,5 +1,7 @@
 using Day__DAY__;
 
+if (args.Length > 0 && args[0] == "bench") return Bench.Run(args[1..]);
+
 if (args.Length != 1 || (args[0] != "1" && args[0] != "2"))
 {
     Console.Error.WriteLine("usage: __NAME__ <1|2>");

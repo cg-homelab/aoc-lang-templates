@@ -1,5 +1,8 @@
 # __NAME__ (.NET 10; bench uses a Native AOT publish)
 
+solution := "./out/__NAME__"
+scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+
 build:
     dotnet publish src -c Release -o out
 
@@ -9,7 +12,6 @@ run part:
 test:
     dotnet test tests
 
-bench: build
-    hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n '__NAME__ part1' './out/__NAME__ 1' \
-        -n '__NAME__ part2' './out/__NAME__ 2'
+# In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
+bench *args: build
+    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}

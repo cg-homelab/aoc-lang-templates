@@ -6,6 +6,10 @@ require __DIR__ . '/part1.php';
 require __DIR__ . '/part2.php';
 
 $part = $argv[1] ?? '';
+if ($part === 'bench') {
+    require __DIR__ . '/bench.php';
+    exit(bench_main(array_slice($argv, 2)));
+}
 if (!in_array($part, ['1', '2'], true)) {
     fwrite(STDERR, "usage: php main.php <1|2>\n");
     exit(1);

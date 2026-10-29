@@ -1,5 +1,8 @@
 # __NAME__
 
+solution := "php main.php"
+scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+
 build:
     @echo "nothing to build"
 
@@ -9,7 +12,6 @@ run part:
 test:
     php test.php
 
-bench:
-    hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n '__NAME__ part1' 'php main.php 1' \
-        -n '__NAME__ part2' 'php main.php 2'
+# In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
+bench *args:
+    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}

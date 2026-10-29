@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -147,6 +148,7 @@ class NewDayTest(unittest.TestCase):
         (rust / "target" / "junk").write_text("build artifact")
         (rust / "input.txt").write_text("someone's puzzle input")
         (rust / "bench.md").write_text("stale bench")
+        (rust / "bench.json").write_text('{"schema": 1}')
         env = {**git_env(), "GIT_CEILING_DIRECTORIES": str(self.tmp)}
         root = self.tmp / "fallback-year"
         result = self.scaffold(
@@ -158,6 +160,7 @@ class NewDayTest(unittest.TestCase):
         self.assertTrue((day / "Cargo.toml").is_file())
         self.assertFalse((day / "target").exists())
         self.assertFalse((day / "bench.md").exists())
+        self.assertFalse((day / "bench.json").exists())
         self.assertEqual((day / "input.txt").read_text(), "")
 
     def test_fallback_for_untracked_template(self) -> None:
@@ -271,8 +274,9 @@ class NewDayTest(unittest.TestCase):
                         if path.is_file():
                             self.assertNotIn(token, path.read_text(), path)
                 justfile = (day / "justfile").read_text()
-                self.assertIn(f"-n 'day-03-{lang}-v1 part1'", justfile)
-                self.assertIn(f"-n 'day-03-{lang}-v1 part2'", justfile)
+                self.assertIn(f"--name day-03-{lang}-v1", justfile)
+                self.assertIn('scripts := env("AOC_SCRIPTS"', justfile)
+                self.assertRegex(justfile, re.compile(r'^solution := "', re.M))
         cargo = (self.year / "days" / "day-03-rust-v1" / "Cargo.toml").read_text()
         self.assertIn('name = "day-03-rust-v1"', cargo)
 

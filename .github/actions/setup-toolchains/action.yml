@@ -1,7 +1,9 @@
 name: Set up AoC toolchains
 description: >-
   Install just, hyperfine and the toolchain for one language template
-  (or every template with lang: all).
+  (or every template with lang: all). hyperfine is optional for users (it
+  adds the whole-process Wall column to bench.json); it is installed here so
+  CI covers that path.
 
 inputs:
   lang:
@@ -25,7 +27,9 @@ runs:
             ;;
         esac
 
-    - name: Install just and hyperfine
+    # hyperfine is optional for bench_day.py (adds the Wall column); installed
+    # here so CI exercises that path too.
+    - name: Install just and hyperfine (optional for users)
       uses: taiki-e/install-action@v2
       with:
         tool: just,hyperfine

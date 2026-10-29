@@ -1,5 +1,8 @@
 # __NAME__ (uv)
 
+solution := ".venv/bin/python main.py"
+scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+
 build:
     uv sync --quiet
 
@@ -9,8 +12,7 @@ run part: build
 test: build
     uv run --quiet --no-sync pytest -q
 
-# Benches the venv python directly — no uv wrapper overhead in the numbers.
-bench: build
-    hyperfine -N --warmup 3 --export-markdown bench.md \
-        -n '__NAME__ part1' '.venv/bin/python main.py 1' \
-        -n '__NAME__ part2' '.venv/bin/python main.py 2'
+# In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
+# Runs the venv python directly — no uv wrapper overhead in the numbers.
+bench *args: build
+    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}

@@ -1,7 +1,11 @@
+import { bench } from "./bench";
 import { process as part1 } from "./part1";
 import { process as part2 } from "./part2";
 
 const part = Bun.argv[2];
+if (part === "bench") {
+  process.exit(await bench(Bun.argv.slice(3)));
+}
 if (part !== "1" && part !== "2") {
   console.error("usage: bun main.ts <1|2>");
   process.exit(1);

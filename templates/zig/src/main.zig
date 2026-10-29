@@ -1,12 +1,14 @@
 const std = @import("std");
 const part1 = @import("part1.zig");
 const part2 = @import("part2.zig");
+const bench = @import("bench.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
 
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "bench")) return bench.run(init, args[2..]);
     const part = if (args.len == 2) args[1] else "";
     const process = if (std.mem.eql(u8, part, "1"))
         &part1.process
@@ -39,4 +41,5 @@ pub fn main(init: std.process.Init) !u8 {
 test {
     _ = part1;
     _ = part2;
+    _ = bench;
 }

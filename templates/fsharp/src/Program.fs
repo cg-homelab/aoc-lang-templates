@@ -9,6 +9,7 @@ open System.IO
 [<EntryPoint>]
 let main argv =
     match argv with
+    | _ when argv.Length > 0 && argv.[0] = "bench" -> Bench.run argv.[1..]
     | [| ("1" | "2") as part |] ->
         if not (File.Exists "input.txt") then
             Console.Error.WriteLine "input.txt missing — paste your puzzle input"
