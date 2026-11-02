@@ -1,0 +1,14 @@
+{
+  "langrev": "1",
+  "warnings": [ "no-unused" ],
+  "sources": [ "src/**" ],
+  // Every build artifact (including out/testrun from `c3c test`) goes in out/.
+  "build-dir": "out",
+  "output": "out",
+  "targets": {
+    // The target name is the solution directory name and becomes the
+    // binary name: out/__NAME__.
+    "__NAME__": { "type": "executable" }
+  },
+  "opt": "O3"
+}

@@ -1,0 +1,17 @@
+# __NAME__
+
+solution := "./out/__NAME__"
+scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+
+build:
+    c3c build -q
+
+run part: build
+    ./out/__NAME__ {{part}}
+
+test:
+    c3c test -q
+
+# In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
+bench *args: build
+    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}

@@ -1,0 +1,23 @@
+# __NAME__
+
+solution := "./out/__NAME__"
+scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+cc := env("CC", "cc")
+cflags := env("CFLAGS", "-std=gnu17 -O2 -Wall -Wextra -Wpedantic")
+ldflags := env("LDFLAGS", "-lm")
+
+build:
+    mkdir -p out
+    {{cc}} {{cflags}} -o out/__NAME__ src/main.c src/part1.c src/part2.c src/bench.c {{ldflags}}
+
+run part: build
+    ./out/__NAME__ {{part}}
+
+test:
+    mkdir -p out
+    {{cc}} {{cflags}} -Isrc -o out/test tests/test.c src/part1.c src/part2.c src/bench.c {{ldflags}}
+    ./out/test
+
+# In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
+bench *args: build
+    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}
