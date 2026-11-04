@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lang: [rust, go, python, ts, php, csharp, fsharp, zig]
+        lang: [rust, go, python, ts, php, csharp, fsharp, zig, c, c3]
     defaults:
       run:
         shell: bash

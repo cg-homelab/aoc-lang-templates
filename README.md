@@ -6,8 +6,8 @@ at `lang-templates/` by the year template
 [advent-of-code-template](https://github.com/cg-homelab/advent-of-code-template),
 so every year repo gets template fixes by bumping the submodule.
 
-Languages: `rust`, `go`, `python`, `ts`, `php`, `csharp`, `fsharp`, `zig`
-(see `templates/`).
+Languages: `rust`, `go`, `python`, `ts`, `php`, `csharp`, `fsharp`, `zig`, `c`,
+`c3` (see `templates/`).
 
 ## Layout
 
@@ -365,5 +365,8 @@ README for the migration.
 - [just](https://github.com/casey/just) 1.17 or newer
 - Python 3.11+ for the scripts and `just bench`
 - The toolchain of each language you use
+  - C needs a C17 compiler available as `cc` (override with the `CC`
+    environment variable); `just build` runs it directly, there is no Makefile
+  - C3 needs [`c3c`](https://github.com/c3lang/c3c) 0.8.5 or newer
 - [hyperfine](https://github.com/sharkdp/hyperfine) is optional: when present
   it adds the whole-process Wall column

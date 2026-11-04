@@ -7,7 +7,7 @@ description: >-
 
 inputs:
   lang:
-    description: "Template language (rust, go, python, ts, php, csharp, fsharp, zig) or 'all'"
+    description: "Template language (rust, go, python, ts, php, csharp, fsharp, zig, c, c3) or 'all'"
     required: false
     default: all
 
@@ -20,9 +20,9 @@ runs:
         AOC_LANG: ${{ inputs.lang }}
       run: |
         case "$AOC_LANG" in
-          all|rust|go|python|ts|php|csharp|fsharp|zig) ;;
+          all|rust|go|python|ts|php|csharp|fsharp|zig|c|c3) ;;
           *)
-            echo "::error::setup-toolchains: unknown lang '$AOC_LANG' (expected all, rust, go, python, ts, php, csharp, fsharp or zig)"
+            echo "::error::setup-toolchains: unknown lang '$AOC_LANG' (expected all, rust, go, python, ts, php, csharp, fsharp, zig, c or c3)"
             exit 1
             ;;
         esac
@@ -86,3 +86,24 @@ runs:
       uses: mlugg/setup-zig@v2
       with:
         version: 0.17.0
+
+    - name: Set up C
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'c' }}
+      shell: bash
+      # ubuntu runners ship gcc as cc; fail early if a runner image drops it.
+      run: cc --version
+
+    # No setup action exists for C3, so install the pinned release directly.
+    # Dependabot only tracks GitHub Actions: bump C3_VERSION by hand.
+    - name: Set up C3
+      if: ${{ inputs.lang == 'all' || inputs.lang == 'c3' }}
+      shell: bash
+      env:
+        C3_VERSION: v0.8.5_1
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/c3"
+        curl -fsSL "https://github.com/c3lang/c3c/releases/download/$C3_VERSION/c3-linux.tar.gz" \
+          | tar -xz -C "$RUNNER_TEMP/c3"
+        echo "$RUNNER_TEMP/c3/c3" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/c3/c3/c3c" --version
