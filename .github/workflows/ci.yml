@@ -17,14 +17,17 @@ permissions:
   contents: read
 
 jobs:
-  scripts:
+  toolkit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Lint
+        run: uv run --locked ruff check
       - name: Unit tests
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - name: Byte-compile scripts
-        run: python3 -m py_compile scripts/*.py
+        run: uv run --locked pytest -q
 
   # Scaffolds day 1 from each template into a scratch year dir and checks the
   # per-day contract: test passes, run prints the placeholder answers, the
@@ -49,7 +52,7 @@ jobs:
         run: |
           echo "YEAR=$RUNNER_TEMP/year" >> "$GITHUB_ENV"
           echo "DAY=$RUNNER_TEMP/year/days/day-01-${{ matrix.lang }}-v1" >> "$GITHUB_ENV"
-          echo "AOC_SCRIPTS=$GITHUB_WORKSPACE/scripts" >> "$GITHUB_ENV"
+          echo "AOC_TOOLKIT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Set up toolchains
         uses: ./.github/actions/setup-toolchains
@@ -57,7 +60,7 @@ jobs:
           lang: ${{ matrix.lang }}
 
       - name: Scaffold day 1
-        run: python3 "$GITHUB_WORKSPACE/scripts/new_day.py" --root "$YEAR" 1 ${{ matrix.lang }}
+        run: uv run --quiet --frozen --no-dev --project "$GITHUB_WORKSPACE" aoc-toolkit new --root "$YEAR" 1 ${{ matrix.lang }}
 
       - name: Write sample input
         run: printf 'foo\nbar\nbaz\n' > "$DAY/input.txt"

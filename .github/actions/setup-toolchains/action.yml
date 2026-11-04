@@ -1,6 +1,6 @@
 name: Set up AoC toolchains
 description: >-
-  Install just, hyperfine and the toolchain for one language template
+  Install just, hyperfine, uv and the toolchain for one language template
   (or every template with lang: all). hyperfine is optional for users (it
   adds the whole-process Wall column to bench.json); it is installed here so
   CI covers that path.
@@ -27,12 +27,17 @@ runs:
             ;;
         esac
 
-    # hyperfine is optional for bench_day.py (adds the Wall column); installed
+    # hyperfine is optional for `aoc-toolkit bench` (adds the Wall column); installed
     # here so CI exercises that path too.
     - name: Install just and hyperfine (optional for users)
       uses: taiki-e/install-action@v2
       with:
         tool: just,hyperfine
+
+    # uv runs the toolkit (`aoc-toolkit new/bench/...`) for every language, plus
+    # the python template's own venv.
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v7
 
     - name: Set up Rust
       if: ${{ inputs.lang == 'all' || inputs.lang == 'rust' }}
@@ -44,10 +49,6 @@ runs:
       with:
         go-version: stable
         cache: false
-
-    - name: Set up uv
-      if: ${{ inputs.lang == 'all' || inputs.lang == 'python' }}
-      uses: astral-sh/setup-uv@v7
 
     - name: Set up Bun
       if: ${{ inputs.lang == 'all' || inputs.lang == 'ts' }}

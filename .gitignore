@@ -1,3 +1,4 @@
+.codegraph
 # Per-day files from running a template in place: never commit a puzzle
 # input to this public repo (and the fallback copy would spread it).
 /templates/*/input.txt
@@ -11,7 +12,14 @@
 /templates/**/node_modules/
 /templates/**/.venv/
 /templates/**/__pycache__/
-/scripts/__pycache__/
+# The toolkit's own uv project: venv created by `uv run --project`, build output, tool caches.
+# uv.lock at the root IS committed.
+/.venv/
+/dist/
+/.ruff_cache/
+/.pytest_cache/
+__pycache__/
+*.pyc
 /templates/**/*.pyc
 /templates/**/.pytest_cache/
 /templates/*/solution

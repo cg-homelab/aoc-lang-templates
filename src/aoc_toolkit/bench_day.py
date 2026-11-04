@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark one solution in-process: time only process(input), per part.
 
-Usage: python3 lang-templates/scripts/bench_day.py [--name NAME] [--input input.txt]
+Usage: aoc-toolkit bench [--name NAME] [--input input.txt]
            [--time 1.0] [--min-iterations 10] [--max-iterations 100000]
            [--iterations N] [--warmup K] [--timeout SECONDS] [--no-hyperfine]
            [--json-out bench.json] -- <cmd> [args...]
@@ -38,8 +38,8 @@ default --input, without --no-hyperfine) it also records hyperfine's
 whole-process wall time of `<cmd> <part>`. The summary, with the machine
 (`system`: CPU and OS) and the year repo's `commit` (short hash, `(dirty)`
 when tracked files are modified, null outside a git repo), is written
-atomically to bench.json and printed as a markdown table. collect_benches.py
-merges bench.json files into the year repo's benchmarks.json / benchmarks.md.
+atomically to bench.json and printed as a markdown table. `aoc-toolkit
+collect` merges bench.json files into the year repo's benchmarks.json / benchmarks.md.
 
 A harness that never prints `done` (or a complete answer) would block the
 driver forever, so a watchdog kills it: after 60 s for the zero-iteration
@@ -750,7 +750,7 @@ def os_name() -> str:
     return f"{parts} ({platform.machine() or 'unknown'})"
 
 
-# Files collect_benches.py regenerates at the repo root: modifying them is not "dirty".
+# Files `aoc-toolkit collect` regenerates at the repo root: modifying them is not "dirty".
 GENERATED_PATHSPECS = (":(top,exclude)benchmarks.json", ":(top,exclude)benchmarks.md")
 
 
@@ -896,7 +896,7 @@ _positive_float.__name__ = "positive number"
 
 def build_parser() -> UsageArgumentParser:
     parser = UsageArgumentParser(
-        prog="bench_day.py",
+        prog="aoc-toolkit bench",
         usage="%(prog)s [options] -- <cmd> [args...]",
         description="Time a solution's process() in-process, per part, and write bench.json.",
     )
@@ -957,7 +957,7 @@ def run(argv: list[str]) -> int:
 
     default_input = args.input == DEFAULT_INPUT
     if not default_input:
-        print(f"note: --input {args.input}: the result goes to {args.json_out}, but collect_benches.py "
+        print(f"note: --input {args.input}: the result goes to {args.json_out}, but `aoc-toolkit collect` "
               "will not merge it into benchmarks.json", file=sys.stderr)
     use_hyperfine = False
     if default_input and not args.no_hyperfine:

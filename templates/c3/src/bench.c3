@@ -1,6 +1,6 @@
 // In-process timing harness used by `just bench`. You never need to edit
 // this file: it calls `part1::process` / `part2::process` and prints the
-// samples for `bench_day.py` (harness protocol 2).
+// samples for `aoc-toolkit bench` (harness protocol 2).
 //
 // Protocol: `<cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>`
 //

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,9 +9,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import resolve_day as rd
+import aoc_toolkit.resolve_day as rd
 
-SCRIPTS = Path(__file__).resolve().parent
+# The subprocesses import this checkout's package, with or without uv.
+SRC = str(Path(__file__).resolve().parents[1] / "src")
 
 
 class ResolveTest(unittest.TestCase):
@@ -174,14 +176,14 @@ class MainProcessTest(unittest.TestCase):
     def run_main(
         self, *args: str, close_stdin: bool = False, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
-        """Run the script itself; --root is passed unless a cwd is given."""
-        cmd = [sys.executable, str(SCRIPTS / "resolve_day.py")]
+        """Run `aoc-toolkit resolve` itself; --root is passed unless a cwd is given."""
+        cmd = [sys.executable, "-m", "aoc_toolkit", "resolve"]
         cmd += list(args) if cwd is not None else ["--root", str(self.root), *args]
         if close_stdin:
             cmd = ["sh", "-c", '"$@" <&-', "sh", *cmd]
         return subprocess.run(
             cmd, stdin=None if close_stdin else subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=30, cwd=cwd,
+            capture_output=True, text=True, timeout=30, cwd=cwd, env={**os.environ, "PYTHONPATH": SRC},
         )
 
     def test_several_fails_without_prompt(self) -> None:
@@ -210,7 +212,7 @@ class MainProcessTest(unittest.TestCase):
             with self.subTest(args=args):
                 r = self.run_main(*args)
                 self.assertEqual(r.returncode, 1)
-                self.assertIn("usage: resolve_day.py [--root DIR] <target>", r.stderr)
+                self.assertIn("usage: aoc-toolkit resolve [--root DIR] <target>", r.stderr)
                 self.assertIn("error: ", r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
 

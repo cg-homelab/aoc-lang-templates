@@ -1,6 +1,6 @@
 //! In-process timing harness used by `just bench`. You never need to edit
 //! this file: it calls part1.process / part2.process repeatedly and prints
-//! the per-call timings for bench_day.py.
+//! the per-call timings for `aoc-toolkit bench`.
 //!
 //! Protocol: <cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>
 //!

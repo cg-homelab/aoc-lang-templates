@@ -1,7 +1,7 @@
 # __NAME__ (uv)
 
 solution := ".venv/bin/python main.py"
-scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+toolkit := env("AOC_TOOLKIT", "../../toolkit")
 
 build:
     uv sync --quiet
@@ -13,6 +13,6 @@ test: build
     uv run --quiet --no-sync pytest -q
 
 # In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
-# Runs the venv python directly — no uv wrapper overhead in the numbers.
+# The day's venv python is run directly as the harness; uv only launches the driver, so no wrapper overhead is in the numbers.
 bench *args: build
-    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}
+    uv run --quiet --frozen --no-dev --project "{{toolkit}}" aoc-toolkit bench --name __NAME__ {{args}} -- {{solution}}

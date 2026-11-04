@@ -1,10 +1,11 @@
-# aoc-lang-templates
+# aoc-toolkit
 
 Language templates for [Advent of Code](https://adventofcode.com/) days, plus
-the script that scaffolds a day from them. It is consumed as a git submodule
-at `lang-templates/` by the year template
+the `aoc-toolkit` CLI that scaffolds a day from them, resolves day numbers to
+solution directories, benchmarks a solution and aggregates the results. It is
+consumed as a git submodule at `toolkit/` by the year template
 [advent-of-code-template](https://github.com/cg-homelab/advent-of-code-template),
-so every year repo gets template fixes by bumping the submodule.
+so every year repo gets template and tooling fixes by bumping the submodule.
 
 Languages: `rust`, `go`, `python`, `ts`, `php`, `csharp`, `fsharp`, `zig`, `c`,
 `c3` (see `templates/`).
@@ -13,14 +14,17 @@ Languages: `rust`, `go`, `python`, `ts`, `php`, `csharp`, `fsharp`, `zig`, `c`,
 
 ```
 templates/<lang>/                      one directory per language template
-scripts/new_day.py                     scaffolds days/day-NN-<lang>-vN from a template
-scripts/resolve_day.py                 resolves a day number or solution name to its directories
-scripts/collect_benches.py             merges every day's bench.json into benchmarks.json and renders benchmarks.md
-scripts/bench_day.py                   in-process benchmark driver behind `just bench`
-.github/actions/setup-toolchains/      composite action: just, hyperfine and per-language toolchains
+src/aoc_toolkit/cli.py                 the `aoc-toolkit` entry point: dispatches `new`, `resolve`, `bench`, `collect`
+src/aoc_toolkit/new_day.py             `aoc-toolkit new`: scaffolds days/day-NN-<lang>-vN from a template
+src/aoc_toolkit/resolve_day.py         `aoc-toolkit resolve`: resolves a day number or solution name to its directories
+src/aoc_toolkit/collect_benches.py     `aoc-toolkit collect`: merges every day's bench.json into benchmarks.json and renders benchmarks.md
+src/aoc_toolkit/bench_day.py           `aoc-toolkit bench`: in-process benchmark driver behind `just bench`
+tests/                                 pytest suite (unittest-style) for the CLI modules
+pyproject.toml, uv.lock, .python-version   the uv project (runtime is stdlib-only; Python 3.13)
+.github/actions/setup-toolchains/      composite action: just, uv, hyperfine and per-language toolchains
 ```
 
-The year repo's root justfile calls the scripts through the `AOC_SCRIPTS`
+The year repo's root justfile calls the CLI through the `AOC_TOOLKIT`
 environment variable (see [Justfile variables](#justfile-variables)).
 
 ## Per-day contract
@@ -33,7 +37,7 @@ directory:
 | `just run <part>` | Solve part 1 or 2 against `input.txt`, print the answer |
 | `just test` | Language-native tests against `example1.txt`/`example2.txt` |
 | `just build` | Produce an optimized artifact (no-op where not applicable) |
-| `just bench` | Build, then run `bench_day.py` for both parts: in-process timing (+ hyperfine whole-process wall time when installed), written to `bench.json` |
+| `just bench` | Build, then run `aoc-toolkit bench` for both parts: in-process timing (+ hyperfine whole-process wall time when installed), written to `bench.json` |
 
 The solution executable takes the part number as its only argument
 (`<cmd> 1` / `<cmd> 2`) and reads `input.txt` from the day directory.
@@ -89,7 +93,7 @@ supply stdin, for example `echo | <cmd> bench 1 input.txt 0 0 5`.
 
 There is no JSON and no memory measurement in the harness. Diagnostics inside
 `process()` must go to stderr: anything extra on stdout breaks the output and
-the driver rejects it. The harness does no warmup; `bench_day.py` discards the
+the driver rejects it. The harness does no warmup; `aoc-toolkit bench` discards the
 warmup samples and measures peak memory from the outside.
 
 ### Justfile variables
@@ -98,25 +102,32 @@ Every template justfile declares two variables:
 
 ```just
 solution := "./target/release/__NAME__"
-scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+toolkit := env("AOC_TOOLKIT", "../../toolkit")
 
 # In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
 bench *args: build
-    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}
+    uv run --quiet --frozen --no-dev --project "{{toolkit}}" aoc-toolkit bench --name __NAME__ {{args}} -- {{solution}}
 ```
 
 - `solution` is the executable command, which may be several words
   (`.venv/bin/python main.py`, `php main.php`). It is deliberately not quoted
   in the recipe so it splits into arguments.
-- `scripts` is the directory holding `bench_day.py`. The year repo's root
-  justfile exports `AOC_SCRIPTS` (its `lang-templates/scripts` directory); CI
-  here sets it to `$GITHUB_WORKSPACE/scripts`. The default only works for a
-  day at `days/<name>` next to `lang-templates/`.
+- `toolkit` is the toolkit submodule root, the directory holding
+  `pyproject.toml`. The year repo's root justfile exports `AOC_TOOLKIT` (its
+  `toolkit/` directory); CI here sets it to `$GITHUB_WORKSPACE`. The default
+  only works for a day at `days/<name>` next to `toolkit/`.
+
+The uv flags: `--project` makes uv use the toolkit's project and environment
+while the day directory stays the working directory, which the driver needs.
+The first run creates `toolkit/.venv` (gitignored in the toolkit) and may
+download Python 3.13. `--frozen` never rewrites `uv.lock`, so the submodule
+stays clean, and `--no-dev` skips pytest and ruff. `--quiet` hides uv's own
+progress output.
 
 Extra arguments pass straight through to the driver, for example
 `just bench --time 3 --no-hyperfine`. `{{args}}` is re-split by the shell, so a
 flag value containing a space (for example `--json-out "x y.json"`) is not
-supported from `just bench`; run `bench_day.py` directly for that. Its main
+supported from `just bench`; run `aoc-toolkit bench` directly for that. Its main
 flags:
 
 | Flag | Meaning |
@@ -126,11 +137,11 @@ flags:
 | `--min-iterations N`, `--max-iterations N` | Bounds for the iteration count the harness picks (defaults 10 and 100000, at most 2^31-1) |
 | `--iterations N` | N measured iterations (the driver asks the harness for N+K with budget 0) |
 | `--warmup K` | Fixed number of discarded warmup samples; must be smaller than `--min-iterations` |
-| `--input FILE` | Time against another input (skips the run-mode check and hyperfine). The result is written to `bench.json`, but `collect_benches.py` does not merge runs made with another input into `benchmarks.json` (the existing entry in `benchmarks.json` is kept); re-run `just bench` without `--input` to refresh |
+| `--input FILE` | Time against another input (skips the run-mode check and hyperfine). The result is written to `bench.json`, but `aoc-toolkit collect` does not merge runs made with another input into `benchmarks.json` (the existing entry in `benchmarks.json` is kept); re-run `just bench` without `--input` to refresh |
 | `--no-hyperfine` | Skip the whole-process wall time |
 | `--json-out FILE` | Where to write the summary (default `bench.json`) |
 
-`bench_day.py` exits 0 on success, 1 on usage errors, 2 when the solution
+`aoc-toolkit bench` exits 0 on success, 1 on usage errors, 2 when the solution
 fails, 3 on a protocol violation and 4 on an answer mismatch.
 
 Per part the driver runs the run-mode check (default input only), then a
@@ -176,11 +187,11 @@ highest existing version for that day and language, so a deleted `v2` next to
 All solutions of a day share the puzzle input: when another
 `days/day-NN-*-v*` directory of the same day has a non-empty `input.txt`, the
 new solution gets a copy of it (from the most recently modified one) and the
-script says where it came from. Otherwise `input.txt` starts empty.
+scaffolder says where it came from. Otherwise `input.txt` starts empty.
 
 ## Tokens
 
-`scripts/new_day.py` replaces two literal tokens, in file contents and in file
+`aoc-toolkit new` replaces two literal tokens, in file contents and in file
 or directory names:
 
 | Token | Replaced with | Use it for |
@@ -197,26 +208,34 @@ instead, minus known artifact directories (`target/`, `node_modules/`,
 ## Using it in a year repo
 
 ```sh
-git submodule add https://github.com/cg-homelab/aoc-lang-templates.git lang-templates
-git -C lang-templates checkout v3.0.0   # pin a release tag
-git add lang-templates
+git submodule add https://github.com/cg-homelab/aoc-toolkit.git toolkit
+git -C toolkit checkout v5.0.0   # pin a release tag
+git add toolkit
 
 # from the year repo root: creates days/day-03-rust-v1/ from templates/rust
-python3 lang-templates/scripts/new_day.py 3 rust
+uv run --frozen --no-dev --project toolkit aoc-toolkit new 3 rust
 # again: days/day-03-rust-v2/; another language: days/day-03-zig-v1/
-python3 lang-templates/scripts/new_day.py 3 rust
-python3 lang-templates/scripts/new_day.py 3 zig
+uv run --frozen --no-dev --project toolkit aoc-toolkit new 3 rust
+uv run --frozen --no-dev --project toolkit aoc-toolkit new 3 zig
 # no arguments: prompts for the day and the language
-python3 lang-templates/scripts/new_day.py
+uv run --frozen --no-dev --project toolkit aoc-toolkit new
 
-# pick up template changes later: move to a newer tag...
-git -C lang-templates fetch --tags && git -C lang-templates checkout v3.1.0
+# pick up toolkit changes later: move to a newer tag...
+git -C toolkit fetch --tags && git -C toolkit checkout v5.1.0
 # ...or follow main
-git submodule update --remote lang-templates
-git add lang-templates
+git submodule update --remote toolkit
+git add toolkit
 ```
 
-`new_day.py` creates `days/` in the current directory (override with
+The first `uv run` creates `toolkit/.venv` and may download Python 3.13 (see
+[Justfile variables](#justfile-variables) for the flags). Without uv, run the
+CLI on Python 3.13 or newer straight from the source tree:
+
+```sh
+PYTHONPATH=toolkit/src python3 -m aoc_toolkit new 3 rust
+```
+
+`aoc-toolkit new` creates `days/` in the current directory (override with
 `--root <dir>`), never touches an existing solution directory, and creates
 `input.txt` (copied from a sibling solution of the same day, else empty). It
 prints the created directory and a hint that names it, for example
@@ -225,27 +244,27 @@ prints the created directory and a hint that names it, for example
 name).
 
 `day` and `lang` are optional. When one is missing and stdin is a terminal,
-the script prompts for it: the day as a number from 1 to 25, then the
+`aoc-toolkit new` prompts for it: the day as a number from 1 to 25, then the
 language, either by name or by its number in the printed list, which also
 shows the solutions that already exist for that day. Prompts go to stderr, so
 stdout only carries the result. A single argument that is a language name
-(`new_day.py rust`) is taken as the language, so only the day is prompted
+(`aoc-toolkit new rust`) is taken as the language, so only the day is prompted
 for. When stdin is not a terminal (CI, pipes), a missing argument is an error
 that prints the usage line and exits 1.
 
-`resolve_day.py` and `collect_benches.py` are called from the year repo root
-and use the current directory as the root (`--root <dir>` to override).
+`aoc-toolkit resolve` and `aoc-toolkit collect` are run from the year repo
+root and use the current directory as the root (`--root <dir>` to override).
 
 ### benchmarks.md
 
-`collect_benches.py [--root DIR] [--tablemode {single,ranking}]` merges every
+`aoc-toolkit collect [--root DIR] [--tablemode {single,ranking}]` merges every
 `days/day-NN-<lang>-vN/bench.json` into `benchmarks.json` at the year repo
 root and renders `benchmarks.md` from it. `just bench` and `just bench-all`
 run it after benchmarking; `just benchmarks` runs it without benchmarking.
 
 `benchmarks.json` is the committed source of truth. It holds one entry per
 solution with the timings of both parts, the date it was benched, and the CPU,
-OS and commit it was benched on (`bench_day.py` records `system` and `commit`
+OS and commit it was benched on (`aoc-toolkit bench` records `system` and `commit`
 in `bench.json`; `(dirty)` after the commit means tracked files other than
 `benchmarks.json` / `benchmarks.md` had uncommitted changes). Puzzle answers
 are stripped. `benchmarks.md` is generated from it, so it can be rebuilt at
@@ -291,18 +310,20 @@ Merge rules:
   numbers) prints a warning and keeps the entry.
 - Runs made with a non-default `--input` are not merged, so the existing entry
   is kept.
-- A `bench.json` from lang-templates v3 has no `system`/`commit`; they are
+- A `bench.json` from toolkit v3 (then still called lang-templates) has no `system`/`commit`; they are
   filled from the machine and commit running the merge.
 - `just bench-all` rebuilds every entry whose bench succeeded.
-- A corrupt `benchmarks.json` makes the script exit 1 without writing
+- A corrupt `benchmarks.json` makes `aoc-toolkit collect` exit 1 without writing
   anything.
 
 After cloning a year repo, run `git submodule update --init` if
-`lang-templates/` is empty.
+`toolkit/` is empty.
 
 ## CI
 
-`.github/workflows/ci.yml` runs the script's unit tests, then, for every
+`.github/workflows/ci.yml` has a `toolkit` job that runs `ruff check` and the
+pytest suite through uv (`uv run --locked ruff check`, `uv run --locked
+pytest -q`). A `validate` matrix job then, for every
 template, scaffolds day 1 into a scratch directory as `days/day-01-<lang>-v1`
 with the `setup-toolchains` action and checks the contract: `just test` passes,
 `just run 1`/`just run 2` print `3`/`9` for a three-line sample input, and
@@ -326,7 +347,7 @@ installs the .NET Native AOT prerequisites with `apt-get`), so use it on
 - uses: actions/checkout@v7
   with:
     submodules: true
-- uses: ./lang-templates/.github/actions/setup-toolchains
+- uses: ./toolkit/.github/actions/setup-toolchains
   with:
     lang: all   # or a single language
 ```
@@ -337,21 +358,26 @@ Releases are semver tags (`v1.0.0`), created automatically by the Release
 workflow when a PR merges to main. The bump comes from the PR label
 `release/major`, `release/minor` or `release/patch`, and is a patch when the PR
 is unlabeled. `release/skip` merges without creating a tag. A breaking change
-to the per-day contract or to `new_day.py`'s interface must carry
-`release/major`. Year repos pin a tag in their submodule. Dependabot's
-`gitsubmodule` ecosystem can open bump PRs, but it moves the submodule to the
-head of its tracked branch rather than to the newest tag, so review those
-against the release notes.
+to the per-day contract or to the `aoc-toolkit` CLI's interface must carry
+`release/major`. A major bump also bumps `version` in `pyproject.toml` and
+then runs `uv lock` so `uv.lock` matches (CI runs with `--locked` and fails
+otherwise); minor and patch tags do not touch `pyproject.toml`, so `version`
+only tracks the major line. Year repos pin a tag in their submodule.
+Dependabot's `gitsubmodule` ecosystem can open bump PRs, but it moves the
+submodule to the head of its tracked branch rather than to the newest tag, so
+review those against the release notes.
 
-**v2.0.0 is breaking for consumers.** Solutions are scaffolded into
-`days/day-NN-<lang>-vN` instead of `days/day-NN`, the templates use the new
-`__NAME__` token for package, binary and bench names, and `new_day.py` no
-longer recognises plain `days/day-NN` directories. Year repos on the old
-layout either stay on a v1.x tag or rename each `days/day-NN` once (for
-example to `days/day-NN-<lang>-v1`) and update anything that refers to the
-old paths, such as the year repo's justfile.
+**v5.0.0 is breaking for consumers.** The repo is renamed from
+`aoc-lang-templates` to `aoc-toolkit` and is mounted at `toolkit/`. The
+scripts are replaced by one CLI, `aoc-toolkit new|resolve|bench|collect`, with
+the same flags and exit codes. Template justfiles read `AOC_TOOLKIT` instead
+of `AOC_SCRIPTS` and run the CLI through uv, so uv is required for
+`just bench` in every language. Year repos must `git mv lang-templates
+toolkit`, update the `.gitmodules` URL and run `git submodule sync`, replace
+their root justfile and CI with the year template's v5 versions, and update
+line 4 and the bench recipe of every committed `days/*/justfile`.
 
-**v4.0.0 is breaking for consumers.** `collect_benches.py` keeps its results in
+**v4.0.0 is breaking for consumers.** The collector keeps its results in
 a committed `benchmarks.json` and renders `benchmarks.md` from it, in either
 the `single` or the `ranking` table layout (see [benchmarks.md](#benchmarksmd)),
 so the per-solution `## day-NN-...` sections are gone. Sections written by v3
@@ -361,12 +387,20 @@ justfile, pass `--tablemode` from `bench` and `bench-all`, run
 `just bench-all` once, and commit `benchmarks.json`.
 
 **v3.0.0 is breaking for consumers.** `just bench` writes `bench.json` through
-`bench_day.py` instead of hyperfine's `bench.md`, so every solution executable
-must implement a `bench` mode (see
-[Executable contract](#executable-contract)). `resolve_day.py` and
-`collect_benches.py` moved here from the year repo. Year repos must replace
-their root justfile and delete their own `scripts/`; see the year template's
+the bench driver instead of hyperfine's `bench.md`, so every solution
+executable must implement a `bench` mode (see
+[Executable contract](#executable-contract)). The resolve and collect scripts
+moved here from the year repo. Year repos must replace their root justfile and
+delete their own `scripts/`; see the year template's
 README for the migration.
+
+**v2.0.0 is breaking for consumers.** Solutions are scaffolded into
+`days/day-NN-<lang>-vN` instead of `days/day-NN`, the templates use the new
+`__NAME__` token for package, binary and bench names, and the scaffolder no
+longer recognises plain `days/day-NN` directories. Year repos on the old
+layout either stay on a v1.x tag or rename each `days/day-NN` once (for
+example to `days/day-NN-<lang>-v1`) and update anything that refers to the
+old paths, such as the year repo's justfile.
 
 ## Adding a language
 
@@ -377,9 +411,9 @@ README for the migration.
    is not allowed (see [Tokens](#tokens)). The directory name is the
    language name and must be lowercase letters and digits with optional
    single `-` or `_` separators (`^[a-z0-9]+(?:[-_][a-z0-9]+)*$`), the pattern
-   the year repo uses to resolve `day-NN-<lang>-vN`; `new_day.py` ignores
+   the year repo uses to resolve `day-NN-<lang>-vN`; `aoc-toolkit new` ignores
    template directories with any other name and a unit test enforces it.
-   Declare `solution` and `scripts`, add the `bench *args: build` recipe (see
+   Declare `solution` and `toolkit`, add the `bench *args: build` recipe (see
    [Justfile variables](#justfile-variables)), and implement bench mode per the
    [Executable contract](#executable-contract) in a separate harness file
    users never edit.
@@ -388,16 +422,16 @@ README for the migration.
    step, add the name to the `Validate lang input` case list, and update the
    `lang` input description.
 4. Add it to the language list at the top of this README.
-5. Run the unit tests: `python3 -m unittest discover -s scripts -p 'test_*.py'`.
-6. Scaffold the language into a scratch year with `AOC_SCRIPTS=<repo>/scripts`
-   (`python3 scripts/new_day.py --root <scratch> 1 <lang>`), write a sample
+5. Run the unit tests: `uv run pytest`.
+6. Scaffold the language into a scratch year with `AOC_TOOLKIT=<repo>`
+   (`uv run --project . aoc-toolkit new --root <scratch> 1 <lang>`), write a sample
    `input.txt`, and check that `just bench` in the new day directory writes
    `bench.json`.
 
 ## Requirements
 
 - [just](https://github.com/casey/just) 1.17 or newer
-- Python 3.11+ for the scripts and `just bench`
+- [uv](https://docs.astral.sh/uv/), which provides Python 3.13 for the toolkit on first use
 - The toolchain of each language you use
   - C needs a C17 compiler available as `cc` (override with the `CC`
     environment variable); `just build` runs it directly, there is no Makefile

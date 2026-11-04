@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scaffold a new AoC day from a language template.
 
-Usage: python3 lang-templates/scripts/new_day.py [--root <dir>] [<day 1-25>] [<lang>]
+Usage: aoc-toolkit new [--root <dir>] [<day 1-25>] [<lang>]
 
 Copies the git-tracked files of templates/<lang> to
 <root>/days/day-NN-<lang>-vN (root defaults to the current directory), where
@@ -11,7 +11,7 @@ token with the directory name (day-NN-<lang>-vN) in file contents and names,
 and creates input.txt (gitignored): a copy of the newest non-empty input.txt
 of another solution of the same day, else empty, ready for the puzzle input to
 be pasted in. A missing day or lang is prompted for when stdin is a terminal;
-a lone language argument (new_day.py rust) is taken as the lang.
+a lone language argument (aoc-toolkit new rust) is taken as the lang.
 """
 
 from __future__ import annotations
@@ -27,7 +27,10 @@ from typing import Callable, NamedTuple, NoReturn, TextIO, TypeVar
 
 T = TypeVar("T")
 
-TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+# The toolkit is run from its checkout (editable install via `uv run --project`,
+# or PYTHONPATH=src), so templates/ sits two levels above this package; a wheel
+# or `uv tool install` would not ship templates/.
+TEMPLATES = Path(__file__).resolve().parents[2] / "templates"
 DAY_TOKEN = "__DAY__"  # zero-padded day number: 03
 NAME_TOKEN = "__NAME__"  # solution directory name: day-03-rust-v1
 # Template (language) directory names. The year repo's justfile resolves
@@ -165,7 +168,7 @@ def shared_input(days: Path, padded: str) -> Path | None:
 
 
 def stdin_is_tty() -> bool:
-    # sys.stdin is None when fd 0 is closed (`new_day.py 1 rust <&-`).
+    # sys.stdin is None when fd 0 is closed (`aoc-toolkit new 1 rust <&-`).
     return sys.stdin is not None and sys.stdin.isatty()
 
 
@@ -244,7 +247,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def scaffold(argv: list[str] | None) -> None:
-    parser = argparse.ArgumentParser(description="Scaffold a new AoC day from a language template.")
+    parser = argparse.ArgumentParser(prog="aoc-toolkit new", description="Scaffold a new AoC day from a language template.")
     parser.add_argument("day", nargs="?", help="day number, 1-25 (prompted for if omitted)")
     parser.add_argument("lang", nargs="?", help="template name under templates/ (prompted for if omitted)")
     parser.add_argument(
@@ -263,7 +266,7 @@ def scaffold(argv: list[str] | None) -> None:
             "If this is a git submodule, run: git submodule update --init"
         )
 
-    # `new_day.py rust` (e.g. from a justfile that drops empty arguments):
+    # `aoc-toolkit new rust` (e.g. from a justfile that drops empty arguments):
     # a lone language name is the lang, not the day; a number stays the day.
     if lang is None and day_arg in langs and not NUMBER.fullmatch(day_arg):
         day_arg, lang = None, day_arg

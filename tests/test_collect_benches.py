@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import collect_benches as cb
+import aoc_toolkit.collect_benches as cb
 
 SYSTEM = {"cpu": "Test CPU", "os": "TestOS 1 (arm64)"}
 FALLBACK_SYSTEM = {"cpu": "Collector CPU", "os": "CollectorOS 2 (x86_64)"}
@@ -679,7 +679,7 @@ class MainTest(CliTestCase):
                 with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
                     cb.main(argv, root=self.root)
                 self.assertEqual(cm.exception.code, 1)
-                self.assertIn("usage: collect_benches.py", err.getvalue())
+                self.assertIn("usage: aoc-toolkit collect", err.getvalue())
                 self.assertIn(message, err.getvalue())
         self.assertEqual(self.files(), (None, None))
 

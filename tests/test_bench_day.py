@@ -1,4 +1,4 @@
-"""Tests for bench_day.py.
+"""Tests for `aoc-toolkit bench` (bench_day.py).
 
 Pure functions are tested directly, the peak-RSS probe against real child
 processes; the CLI is run end to end in a subprocess against fake_harness.py
@@ -25,12 +25,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-SCRIPTS = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPTS))
-import bench_day as bd  # noqa: E402
+import aoc_toolkit.bench_day as bd
 
-BENCH_DAY = SCRIPTS / "bench_day.py"
-FAKE = SCRIPTS / "fake_harness.py"
+FAKE = Path(__file__).resolve().parent / "fake_harness.py"
+# The driver subprocesses import this checkout's package, with or without uv.
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+BENCH = [sys.executable, "-m", "aoc_toolkit", "bench"]
 POSIX_ONLY = unittest.skipIf(os.name == "nt", "fake hyperfine is a shebang script")
 MIB = 1024 * 1024
 LINUX = sys.platform.startswith("linux")
@@ -483,6 +483,8 @@ class MemoryProbeTest(unittest.TestCase):
         proc = self.popen("import sys; sys.exit(7)")
         proc.wait()
         proc.returncode = None  # as if it were reaped behind Popen's back
+        # Restore it, or Popen.__del__ warns "still running" into whatever test is capturing stderr then.
+        self.addCleanup(setattr, proc, "returncode", 7)
         with self.assertRaisesRegex(bd.BenchError, r"exit status unavailable \(child reaped elsewhere\)") as caught:
             bd._reap(proc, None)
         self.assertEqual(caught.exception.code, bd.EXIT_SOLUTION)
@@ -598,7 +600,7 @@ class MemoryProbeTest(unittest.TestCase):
 
 
 class DriverTest(unittest.TestCase):
-    """bench_day.py end to end against fake_harness.py."""
+    """`aoc-toolkit bench` end to end against fake_harness.py."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -617,11 +619,11 @@ class DriverTest(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         clean = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
         clean.update(PATH=str(self.bin), FAKE_COUNTER=str(self.counter), FAKE_HF_LOG=str(self.hf_log),
-                     PYTHONIOENCODING="utf-8")
+                     PYTHONIOENCODING="utf-8", PYTHONPATH=SRC)
         clean.update(env)
         cmd = [sys.executable, str(FAKE)] if cmd is None else cmd
         return subprocess.run(
-            [sys.executable, str(BENCH_DAY), *args, "--", *cmd],
+            [*BENCH, *args, "--", *cmd],
             cwd=self.sol, capture_output=True, text=True, encoding="utf-8", env=clean, timeout=120,
         )
 
@@ -758,7 +760,7 @@ class DriverTest(unittest.TestCase):
         self.assertTrue(all(c[2] == str((self.sol / "example1.txt").resolve()) for c in self.calls()))
         self.assertEqual(self.hyperfine_calls(), [])
         self.assertNotIn("hyperfine", r.stderr)
-        self.assertIn("note: --input example1.txt: the result goes to bench.json, but collect_benches.py "
+        self.assertIn("note: --input example1.txt: the result goes to bench.json, but `aoc-toolkit collect` "
                       "will not merge it into benchmarks.json", r.stderr)
         self.assertEqual(self.bench_json()["input"], "example1.txt")
 
@@ -912,7 +914,7 @@ class DriverTest(unittest.TestCase):
             (("--timeout", "0"), "argument --timeout: invalid positive number value: '0'"),
         ]:
             with self.subTest(args=args):
-                r = subprocess.run([sys.executable, str(BENCH_DAY), *args], cwd=self.sol,
+                r = subprocess.run([*BENCH, *args], cwd=self.sol, env={**os.environ, "PYTHONPATH": SRC},
                                    capture_output=True, text=True, timeout=30)
                 self.assertEqual(r.returncode, 1, r.stderr)
                 self.assertIn(f"error: {message}", r.stderr)

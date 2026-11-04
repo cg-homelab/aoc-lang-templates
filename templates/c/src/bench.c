@@ -1,6 +1,6 @@
 /* In-process timing harness used by `just bench`. You never need to edit
  * this file: it calls `part1_process` / `part2_process` and prints raw
- * samples for the runner (`scripts/bench_day.py`).
+ * samples for the runner (`aoc-toolkit bench`).
  *
  * Protocol: `<cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>`
  * Runs process(input) at least min-iter times, then keeps going until
