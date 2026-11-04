@@ -75,36 +75,43 @@ jobs:
           [ "$p1" = "3" ] || { echo "part 1: expected 3, got '$p1'" >&2; exit 1; }
           [ "$p2" = "9" ] || { echo "part 2: expected 9, got '$p2'" >&2; exit 1; }
 
-      # Drives the executable's bench mode directly and validates the JSON line.
+      # Drives the executable's bench mode directly and validates the sample
+      # lines, the `answer <N>` block and the trailing `done` line. The harness
+      # parks on one stdin line before exiting, so every run gets stdin.
       # $cmd is unquoted on purpose so multi-word commands (`php main.php`) split.
       - name: Harness protocol
         run: |
           set -euo pipefail
           cmd="$(just --justfile "$DAY/justfile" --evaluate solution)"
           just --justfile "$DAY/justfile" build >/dev/null
-          (cd "$DAY" && $cmd bench 1 input.txt 5) > "$RUNNER_TEMP/bench1.json"
-          (cd "$DAY" && $cmd bench 2 input.txt 3) > "$RUNNER_TEMP/bench2.json"
-          # zero iterations is a usage error: non-zero exit, nothing on stdout
+          (cd "$DAY" && echo | $cmd bench 1 input.txt 200000000 5 5) > "$RUNNER_TEMP/bench1.out"
+          (cd "$DAY" && echo | $cmd bench 2 input.txt 200000000 3 3) > "$RUNNER_TEMP/bench2.out"
+          # zero iterations: exit 0 and exactly `done` (the driver's baseline run); EOF releases the park
+          (cd "$DAY" && $cmd bench 1 input.txt 0 0 5 </dev/null) > "$RUNNER_TEMP/bench0.out"
+          [ "$(cat "$RUNNER_TEMP/bench0.out")" = "done" ] || { echo "bench with 0 iterations should print exactly 'done'" >&2; exit 1; }
+          # the harness parks until stdin is released
+          start=$(date +%s%N)
+          (cd "$DAY" && sleep 1 | $cmd bench 1 input.txt 0 0 5) > "$RUNNER_TEMP/benchpark.out"
+          end=$(date +%s%N)
+          elapsed_ms=$(( (end - start) / 1000000 ))
+          [ "$elapsed_ms" -ge 900 ] || { echo "bench exited after ${elapsed_ms} ms without waiting for stdin" >&2; exit 1; }
+          [ "$(cat "$RUNNER_TEMP/benchpark.out")" = "done" ] || { echo "parked bench should print exactly 'done'" >&2; exit 1; }
+          # min > max is a usage error: non-zero exit, nothing on stdout, no park
           rc=0
-          (cd "$DAY" && $cmd bench 1 input.txt 0) > "$RUNNER_TEMP/bench0.out" 2>/dev/null || rc=$?
-          [ "$rc" -ne 0 ] || { echo "bench with 0 iterations should fail" >&2; exit 1; }
-          [ ! -s "$RUNNER_TEMP/bench0.out" ] || { echo "bench with 0 iterations wrote to stdout" >&2; exit 1; }
-          python3 - "$RUNNER_TEMP/bench1.json" "$RUNNER_TEMP/bench2.json" <<'EOF'
-          import json, sys
+          (cd "$DAY" && $cmd bench 1 input.txt 0 6 5 </dev/null) > "$RUNNER_TEMP/benchbad.out" 2>/dev/null || rc=$?
+          [ "$rc" -ne 0 ] || { echo "bench with min-iter > max-iter should fail" >&2; exit 1; }
+          [ ! -s "$RUNNER_TEMP/benchbad.out" ] || { echo "bench with min-iter > max-iter wrote to stdout" >&2; exit 1; }
+          python3 - "$RUNNER_TEMP/bench1.out" "$RUNNER_TEMP/bench2.out" <<'EOF'
+          import sys
 
           expected = [(1, 5, "3"), (2, 3, "9")]
-          for path, (part, iterations, answer) in zip(sys.argv[1:], expected):
+          for path, (part, n, answer) in zip(sys.argv[1:], expected):
               text = open(path, encoding="utf-8").read()
-              lines = [l for l in text.splitlines() if l.strip()]
-              assert len(lines) == 1, f"part {part}: expected one JSON line, got {len(lines)}"
-              d = json.loads(lines[0])
-              assert set(d) == {"schema", "part", "iterations", "ns", "answer", "max_rss_before", "max_rss_after"}, set(d)
-              assert d["schema"] == 1 and d["part"] == part and d["iterations"] == iterations and len(d["ns"]) == iterations, d
-              assert all(isinstance(n, int) and n >= 0 for n in d["ns"]), d["ns"]
-              assert d["answer"] == answer, d["answer"]
-              for k in ("max_rss_before", "max_rss_after"):
-                  assert d[k] is None or (isinstance(d[k], int) and d[k] > 0), (k, d[k])
-              print("protocol ok:", d)
+              lines = text.split("\n")
+              assert len(lines) == n + 4 and lines[-1] == "", f"part {part}: unexpected line count {len(lines)}: {text!r}"
+              assert all(l.isascii() and l.isdigit() for l in lines[:n]), f"part {part}: bad sample lines: {lines[:n]}"
+              assert text == "".join(l + "\n" for l in lines[:n]) + "answer 1\n" + answer + "\n" + "done\n", f"part {part}: {text!r}"
+              print("protocol ok:", part, lines[:n], answer)
           EOF
 
       - name: Benchmark
@@ -123,7 +130,8 @@ jobs:
           assert [p["answer"] for p in parts] == ["3", "9"], parts
           for p in parts:
               assert p["wall"] is not None, f"part {p['part']}: no hyperfine wall time"
-              assert isinstance(p["rss_delta_bytes"], int), p["rss_delta_bytes"]
+              for k in ("rss_baseline_bytes", "rss_peak_bytes", "rss_delta_bytes"):
+                  assert isinstance(p[k], int), (k, p[k])
               assert set(p["ns"]) >= {"min", "median", "mean", "stddev", "p99", "max"}, p["ns"]
           print("bench.json ok")
           EOF

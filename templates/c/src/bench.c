@@ -1,14 +1,18 @@
 /* In-process timing harness used by `just bench`. You never need to edit
- * this file: it calls `part1_process` / `part2_process` and prints one
- * JSON line (schema 1) for `bench_day.py`.
+ * this file: it calls `part1_process` / `part2_process` and prints raw
+ * samples for the runner (`scripts/bench_day.py`).
  *
- * Protocol: `<cmd> bench <1|2> <input-path> <iterations>`
+ * Protocol: `<cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>`
+ * Runs process(input) at least min-iter times, then keeps going until
+ * budget-ns has elapsed or max-iter is reached. Stdout: one nanosecond
+ * sample per line, then (only if at least one iteration ran) the line
+ * "answer <N>" followed by the answer text (N bytes) and a newline, then
+ * the line "done". After "done" the harness waits for one line (or EOF) on
+ * stdin before exiting 0, so the runner can read its peak RSS while it is
+ * alive. Errors go to stderr with exit code 1, nothing on stdout, no wait.
  */
 
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE
-#endif
 
 #include <errno.h>
 #include <inttypes.h>
@@ -18,15 +22,16 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/resource.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 #include "bench.h"
 #include "part1.h"
 #include "part2.h"
 
-#define USAGE "usage: __NAME__ bench <1|2> <input-path> <iterations>\n"
+#define USAGE "usage: __NAME__ bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>\n"
 
 /* Keeps the work observable so the compiler cannot optimise it away. */
 static volatile size_t bench_sink;
@@ -65,59 +70,29 @@ char *bench_read_file(const char *path) {
     return buf;
 }
 
-char *bench_json_escape(const char *s) {
-    size_t len = strlen(s);
-    char *out = malloc(len * 6 + 1);
-    if (!out) return NULL;
-    char *p = out;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)s[i];
-        switch (c) {
-        case '"': *p++ = '\\'; *p++ = '"'; break;
-        case '\\': *p++ = '\\'; *p++ = '\\'; break;
-        case '\n': *p++ = '\\'; *p++ = 'n'; break;
-        case '\r': *p++ = '\\'; *p++ = 'r'; break;
-        case '\t': *p++ = '\\'; *p++ = 't'; break;
-        default:
-            if (c < 0x20) p += snprintf(p, 7, "\\u%04x", (unsigned)c);
-            else *p++ = (char)c;
-        }
-    }
-    *p = '\0';
-    return out;
-}
-
-/* Peak RSS in bytes; returns 0 on success, -1 when unavailable. */
-static int max_rss_bytes(uint64_t *out) {
-#if defined(__unix__) || defined(__APPLE__)
-    struct rusage usage;
-    if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0) return -1;
-    uint64_t maxrss = (uint64_t)usage.ru_maxrss;
-#ifdef __APPLE__
-    *out = maxrss; /* macOS reports bytes */
-#else
-    *out = maxrss * 1024; /* Linux reports kilobytes */
-#endif
-    return 0;
-#else
-    (void)out;
-    return -1;
-#endif
-}
-
-static void print_rss(int ok, uint64_t v) {
-    if (ok == 0) printf("%" PRIu64, v);
-    else printf("null");
-}
-
 static uint64_t now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+/* Strict non-negative decimal parse: digits only, no sign/space/empty. */
+static int parse_u64(const char *s, uint64_t *out) {
+    if (s[0] < '0' || s[0] > '9') return -1;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (*end != '\0' || errno != 0) return -1;
+    *out = (uint64_t)v;
+    return 0;
+}
+
 int bench_run(int argc, char **argv) {
-    if (argc != 3) {
+#ifdef _WIN32
+    /* Binary stdout so "\n" is not expanded to "\r\n" (answer <N> is a byte count). */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    if (argc != 5) {
         fputs(USAGE, stderr);
         return 1;
     }
@@ -128,16 +103,15 @@ int bench_run(int argc, char **argv) {
         fputs(USAGE, stderr);
         return 1;
     }
-    const char *part = argv[0];
     const char *path = argv[1];
-    char *end = NULL;
-    errno = 0;
-    long iters = strtol(argv[2], &end, 10);
-    if (argv[2][0] == '\0' || *end != '\0' || errno != 0 || iters <= 0 || (unsigned long)iters > UINT32_MAX) {
+    uint64_t budget_ns, min_u, max_u;
+    if (parse_u64(argv[2], &budget_ns) != 0 || parse_u64(argv[3], &min_u) != 0 ||
+        parse_u64(argv[4], &max_u) != 0 || min_u > UINT32_MAX || max_u > UINT32_MAX ||
+        max_u < min_u) {
         fputs(USAGE, stderr);
         return 1;
     }
-    size_t iterations = (size_t)iters;
+    size_t min_iter = (size_t)min_u, max_iter = (size_t)max_u;
 
     char *input = bench_read_file(path);
     if (!input) {
@@ -145,21 +119,22 @@ int bench_run(int argc, char **argv) {
         return 1;
     }
 
-    /* Allocate and touch the sample buffer up front so its pages are not
-     * counted in the RSS delta. */
-    uint64_t *ns = malloc(iterations * sizeof *ns);
+    /* Allocate and touch the sample buffer up front, identically whether the
+     * loop runs zero or many times (the runner's idle baseline relies on it). */
+    size_t slots = max_iter ? max_iter : 1;
+    uint64_t *ns = malloc(slots * sizeof *ns);
     if (!ns) {
         fputs("bench: out of memory\n", stderr);
         free(input);
         return 1;
     }
-    for (size_t i = 0; i < iterations; i++) ns[i] = UINT64_MAX;
+    for (size_t i = 0; i < slots; i++) ns[i] = UINT64_MAX;
 
-    uint64_t rss_before = 0, rss_after = 0;
-    int rss_before_ok = max_rss_bytes(&rss_before);
     char *first = NULL;
     size_t checksum = 0;
-    for (size_t i = 0; i < iterations; i++) {
+    size_t i = 0;
+    uint64_t t_loop = now_ns();
+    while (i < min_iter || (i < max_iter && now_ns() - t_loop < budget_ns)) {
         uint64_t t0 = now_ns();
         char *answer = process(input);
         uint64_t t1 = now_ns();
@@ -177,13 +152,11 @@ int bench_run(int argc, char **argv) {
         } else {
             int same = strcmp(first, answer) == 0;
             if (!same) {
-                char *got = bench_json_escape(answer);
-                char *want = bench_json_escape(first);
-                fprintf(stderr,
-                        "bench: answer mismatch at iteration %zu: got \"%s\", want \"%s\"\n",
-                        i, got ? got : "", want ? want : "");
-                free(got);
-                free(want);
+                fprintf(stderr, "bench: answer mismatch at iteration %zu: got \"", i);
+                fputs(answer, stderr);
+                fputs("\", want \"", stderr);
+                fputs(first, stderr);
+                fputs("\"\n", stderr);
                 free(answer);
                 free(first);
                 free(ns);
@@ -192,23 +165,25 @@ int bench_run(int argc, char **argv) {
             }
             free(answer);
         }
+        i++;
     }
     bench_sink = checksum;
-    int rss_after_ok = max_rss_bytes(&rss_after);
 
-    char *escaped = bench_json_escape(first);
-    printf("{\"schema\":1,\"part\":%s,\"iterations\":%zu,\"ns\":[", part, iterations);
-    for (size_t i = 0; i < iterations; i++) {
-        if (i > 0) putchar(',');
-        printf("%" PRIu64, ns[i]);
+    for (size_t k = 0; k < i; k++) printf("%" PRIu64 "\n", ns[k]);
+    if (i > 0) {
+        printf("answer %zu\n", strlen(first));
+        fputs(first, stdout);
+        fputc('\n', stdout);
     }
-    printf("],\"answer\":\"%s\",\"max_rss_before\":", escaped ? escaped : "");
-    print_rss(rss_before_ok, rss_before);
-    printf(",\"max_rss_after\":");
-    print_rss(rss_after_ok, rss_after);
-    printf("}\n");
+    fputs("done\n", stdout);
+    fflush(stdout);
 
-    free(escaped);
+    /* Park until the runner has sampled our peak RSS: one stdin line (or
+     * EOF) releases us. */
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+    }
+
     free(first);
     free(ns);
     free(input);

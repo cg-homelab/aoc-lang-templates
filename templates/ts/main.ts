@@ -18,4 +18,4 @@ if (!(await file.exists())) {
 }
 const input = await file.text();
 
-console.log(part === "1" ? part1(input) : part2(input));
+console.log(String(part === "1" ? part1(input) : part2(input)));

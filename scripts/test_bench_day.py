@@ -1,13 +1,16 @@
 """Tests for bench_day.py.
 
-Pure functions are tested directly; the CLI is run end to end in a subprocess
-against fake_harness.py (a protocol-conformant fake solution), with PATH
+Pure functions are tested directly, the peak-RSS probe against real child
+processes; the CLI is run end to end in a subprocess against fake_harness.py
+(a protocol-conformant fake solution), with PATH
 scrubbed so a real hyperfine is never used. Tests that need hyperfine put a
 fake `hyperfine` script first on PATH.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -17,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,6 +32,8 @@ import bench_day as bd  # noqa: E402
 BENCH_DAY = SCRIPTS / "bench_day.py"
 FAKE = SCRIPTS / "fake_harness.py"
 POSIX_ONLY = unittest.skipIf(os.name == "nt", "fake hyperfine is a shebang script")
+MIB = 1024 * 1024
+LINUX = sys.platform.startswith("linux")
 
 FAKE_HYPERFINE = """#!{python}
 import json, os, shlex, subprocess, sys
@@ -59,45 +65,21 @@ with open(args[6], "w", encoding="utf-8") as f:
 WALL = {"mean_s": 0.000912, "stddev_s": 0.000038, "median_s": 0.0009, "min_s": 0.0008, "max_s": 0.0011, "runs": 7}
 
 
-def doc(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "schema": 1, "part": 1, "iterations": 3, "ns": [1, 2, 3], "answer": "3",
-        "max_rss_before": 100, "max_rss_after": 200,
-    }
-    base.update(overrides)
-    return base
-
-
-def line(d: dict[str, object]) -> str:
-    return json.dumps(d, separators=(",", ":")) + "\n"
+def bench_out(ns: list[int], answer: str | None = "3", newline: str = "\n") -> bytes:
+    """A protocol-2 bench-mode stdout: samples, the length-prefixed answer (unless None), `done`."""
+    out = "".join(f"{v}{newline}" for v in ns).encode()
+    if answer is not None:
+        data = answer.encode()
+        out += f"answer {len(data)}{newline}".encode() + data + newline.encode()
+    return out + f"done{newline}".encode()
 
 
 class IterationTest(unittest.TestCase):
-    def test_compute_iterations(self) -> None:
-        self.assertEqual(bd.compute_iterations(1.0, 1_000_000, 10, 100_000), 1000)
-        self.assertEqual(bd.compute_iterations(1.0, 10, 10, 100_000), 100_000)  # clamped high
-        self.assertEqual(bd.compute_iterations(1.0, 2e9, 10, 100_000), 10)  # clamped low
-        self.assertEqual(bd.compute_iterations(1.0, 0, 10, 100_000), 100_000)  # t_cal = 0
-        self.assertEqual(bd.compute_iterations(1e-9, 0, 1, 5), 1)
-        self.assertEqual(bd.compute_iterations(0.5, 3e6, 1, 1000), 167)  # rounded
-
     def test_warmup_rule(self) -> None:
-        for n, k in [(1, 1), (10, 1), (19, 1), (20, 2), (100, 10), (999, 99), (1000, 100), (100_000, 100)]:
+        for n, k in [(1, 0), (2, 1), (10, 1), (19, 1), (20, 2), (100, 10), (999, 99), (1000, 100),
+                     (100_000, 100)]:
             with self.subTest(n=n):
                 self.assertEqual(bd.warmup_for(n), k)
-
-    def test_calibration_iterations(self) -> None:
-        self.assertEqual(bd.calibration_iterations(1_000_000), 100)  # 0.1 s / 1 ms
-        self.assertEqual(bd.calibration_iterations(3_000_000), 33)  # rounded
-        self.assertEqual(bd.calibration_iterations(50_000_000), 5)  # clamped low
-        self.assertEqual(bd.calibration_iterations(99_999_999), 5)
-        self.assertEqual(bd.calibration_iterations(1000), 1000)  # clamped high
-        self.assertEqual(bd.calibration_iterations(0), 1000)  # t1 = 0
-
-    def test_warm_median(self) -> None:
-        self.assertEqual(bd.warm_median([5000, 300, 310, 320, 330]), 315)  # first 20% dropped
-        self.assertEqual(bd.warm_median([9, 9] + [1] * 8), 1)
-        self.assertEqual(bd.warm_median([7, 1, 2, 3]), 2.5)  # 4 // 5 == 0: nothing dropped
 
     def test_trim(self) -> None:
         self.assertEqual(bd.trim_warmup([9, 9, 1, 2], 2), [1, 2])
@@ -346,71 +328,273 @@ class EnvironmentTest(unittest.TestCase):
 
 
 class ParseTest(unittest.TestCase):
-    def parse(self, stdout: str, part: int = 1, iterations: int = 3) -> dict[str, object]:
-        return bd.parse_bench_output(stdout, part, iterations)
+    def parse(self, stdout: bytes, lo: int = 3, hi: int = 3) -> tuple[list[int], str]:
+        return bd.parse_bench_output(stdout, lo, hi)
 
-    def rejects(self, stdout: str, pattern: str, part: int = 1, iterations: int = 3) -> None:
+    def rejects(self, stdout: bytes, pattern: str, lo: int = 3, hi: int = 3) -> None:
         with self.assertRaisesRegex(bd.ProtocolError, pattern):
-            self.parse(stdout, part, iterations)
+            self.parse(stdout, lo, hi)
+
+    def test_example(self) -> None:
+        self.assertEqual(self.parse(b"1532\n1498\n1501\nanswer 1\n3\ndone\n"), ([1532, 1498, 1501], "3"))
 
     def test_accepts(self) -> None:
-        self.assertEqual(self.parse(line(doc())), doc())
-        self.assertEqual(self.parse(line(doc(max_rss_before=None, max_rss_after=None)))["max_rss_after"], None)
-        self.assertEqual(self.parse(line(doc(answer="a \"q\"\n\\")))["answer"], "a \"q\"\n\\")
-        self.assertEqual(self.parse(line(doc(ns=[0, 0, 0], max_rss_after=100)))["ns"], [0, 0, 0])
+        self.assertEqual(self.parse(bench_out([0, 0, 0])), ([0, 0, 0], "3"))
+        self.assertEqual(self.parse(bench_out([1, 2, 3], newline="\r\n")), ([1, 2, 3], "3"))  # CRLF
+        self.assertEqual(self.parse(b"1\n2\n3\nanswer 1\n3\ndone"), ([1, 2, 3], "3"))  # no final newline
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="")), ([1, 2, 3], ""))  # empty answer
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="#.\n.#\n")), ([1, 2, 3], "#.\n.#\n"))
+        # Newlines and protocol words inside the N bytes are answer, not protocol.
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="a\ndone\nanswer 4\n5")),
+                         ([1, 2, 3], "a\ndone\nanswer 4\n5"))
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="  7 ")), ([1, 2, 3], "  7 "))  # verbatim
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="a\r\nb")), ([1, 2, 3], "a\nb"))  # as run mode
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="Δ→✓")), ([1, 2, 3], "Δ→✓"))  # N counts bytes
+        # Run mode decodes "abc\r\n" to "abc\n" and strips it: a final "\r" is not part of the answer.
+        self.assertEqual(self.parse(b"1\n2\n3\nanswer 4\nabc\r\ndone\n"), ([1, 2, 3], "abc"))
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer="a\r\r")), ([1, 2, 3], "a\n"))
+        self.assertEqual(self.parse(bench_out([10**19, 1, 2])), ([10**19, 1, 2], "3"))  # 20 digits
+        self.assertEqual(self.parse(bench_out([5] * 2), lo=2, hi=4), ([5, 5], "3"))  # count at both bounds
+        self.assertEqual(self.parse(bench_out([5] * 4), lo=2, hi=4), ([5] * 4, "3"))
 
     def test_unicode_line_separators_in_answer(self) -> None:
         answer = "a\u2028b\u0085c\u2029d"
-        raw = json.dumps(doc(answer=answer), separators=(",", ":"), ensure_ascii=False)
-        self.assertEqual(self.parse(raw + "\n")["answer"], answer)
-        self.assertEqual(self.parse(raw + "\r\n")["answer"], answer)  # trailing \r tolerated
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer=answer))[1], answer)
+        self.assertEqual(self.parse(bench_out([1, 2, 3], answer=answer, newline="\r\n"))[1], answer)
 
     def test_rejects(self) -> None:
         cases = [
-            ("", "printed nothing"),
-            ("\n  \n", "printed nothing"),
-            ("debug\n" + line(doc()), "printed 2 lines"),
-            ("not json\n", "not JSON"),
-            ("[1, 2]\n", "not a JSON object"),
-            (line(doc(extra=1)), "unknown key.*extra"),
-            (line({k: v for k, v in doc().items() if k != "answer"}), "missing key.*answer"),
-            (line(doc(schema=2)), "unsupported schema 2"),
-            (line(doc(schema=True)), "unsupported schema True"),
-            (line(doc(part=2)), "part 2, expected 1"),
-            (line(doc(iterations=4)), "iterations 4, expected 3"),
-            (line(doc(ns=[1, 2])), "ns has 2 samples, expected 3"),
-            (line(doc(ns="123")), "ns is not a list"),
-            (line(doc(ns=[1, -2, 3])), "non-negative integers"),
-            (line(doc(ns=[1, 2.5, 3])), "non-negative integers"),
-            (line(doc(ns=[1, True, 3])), "non-negative integers"),
-            (line(doc(answer=3)), "answer must be a string"),
-            (line(doc(max_rss_before="1")), "max_rss_before must be"),
-            (line(doc(max_rss_before=None)), "both be integers or both null"),
-            (line(doc(max_rss_before=300)), r"max_rss_after \(200\) is smaller"),
+            (b"", "exited without printing `done`$"),
+            (b"1\n2\n3\nanswer 1\n3\n", "exited without printing `done`$"),
+            (b'{"schema":1,"part":1}\n', r"line 1 is not a sample: '\{.*\}' \(old harness\? regenerate"),
+            (b"debug\n" + bench_out([1, 2, 3]), r"line 1 is not a sample: 'debug' \(is process\(\) printing"),
+            (b"1\n2.5\n3\nanswer 1\n3\ndone\n", "line 2 is not a sample: '2.5'"),
+            (b"1\n-2\n3\nanswer 1\n3\ndone\n", "line 2 is not a sample: '-2'"),
+            (b"1\n+2\n3\nanswer 1\n3\ndone\n", "line 2 is not a sample: '\\+2'"),
+            (b"1\n\n2\n3\nanswer 1\n3\ndone\n", "line 2 is not a sample: ''"),
+            (b"1\nDone\n", "line 2 is not a sample: 'Done'"),
+            (b"1\n2\n3\nanswer\n3\ndone\n", r"line 4 is a malformed `answer` header: 'answer' \(expected"),
+            (b"1\n2\n3\nanswer x\n3\ndone\n", "line 4 is a malformed `answer` header: 'answer x'"),
+            (b"1\n2\n3\nanswer -1\n3\ndone\n", "malformed `answer` header"),
+            (b"1\n2\n3\nanswer  1\n3\ndone\n", "malformed `answer` header"),
+            (b"1\n2\n3\nanswer 9\n3\n", "answer header says 9 bytes, but stdout ended after 2"),
+            (b"1" * 21 + b"\n2\n3\nanswer 1\n3\ndone\n", "line 1 is not a sample: '1{21}'"),
+            (b"9" * 5000 + b"\n2\n3\nanswer 1\n3\ndone\n", r"line 1 is not a sample: '9{80}\.\.\.'"),
+            (b"1\n2\n3\nanswer " + b"0" * 20 + b"1\n3\ndone\n", "malformed `answer` header"),
+            (b"1\n2\n3\nanswer 1\n33\ndone\n", r"answer \(1 bytes\) is not followed by a newline: got '3'"),
+            (b"1\n2\n3\nanswer 1\n3", "not followed by a newline: got end of output"),
+            (b"1\n2\n3\nanswer 1\n3\n4\ndone\n", "line 6 after the answer is not `done`: '4'"),
+            (b"1\nanswer 3\na\nb\n7\ndone\n", "line 5 after the answer is not `done`: '7'"),
+            (bench_out([1, 2, 3]) + b"extra\n", "printed output after `done`: 'extra'"),
+            (bench_out([1, 2, 3]) + b"\n", "printed output after `done`: ''"),
+            (bench_out([1, 2, 3], answer=None), r"printed 3 sample\(s\) but no `answer` block"),
+            (bench_out([1, 2]), "printed 2 samples, expected 3$"),
+            (bench_out([1, 2, 3, 4]), "printed 4 samples, expected 3$"),
+            (bench_out([]), "printed 0 samples, expected 3$"),
         ]
         for stdout, pattern in cases:
             with self.subTest(stdout=stdout[:40]):
                 self.rejects(stdout, pattern)
+        self.rejects(bench_out([1]), "printed 1 samples, expected between 2 and 4", lo=2, hi=4)
+        self.rejects(bench_out([1] * 5), "printed 5 samples, expected between 2 and 4", lo=2, hi=4)
+
+    def test_first_output_line(self) -> None:
+        self.assertEqual(bd._first_output_line(b"\ndone\n"), b"")
+        self.assertEqual(bd._first_output_line(b"done\r\nx\r\n"), b"x")
+
+    def test_reader_stops_at_done(self) -> None:
+        stream = io.BytesIO(bench_out([1, 2]) + b"after\n")
+        consumed = bytearray()
+        self.assertEqual(bd.read_bench_output(stream, consumed), bd.BenchOutput([1, 2], "3"))
+        self.assertEqual(bytes(consumed), bench_out([1, 2]))
+        self.assertEqual(stream.read(), b"after\n")  # left for the caller
+        self.assertEqual(bd.read_bench_output(io.BytesIO(b"done\n")), bd.BenchOutput([], None))
+
+    def fake(self, *args: str, **env: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run([sys.executable, str(FAKE), "bench", *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, env={**os.environ, **env}, timeout=30)
 
     def test_rejects_fake_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             inp = Path(tmp) / "input.txt"
             inp.write_text("x\n")
             cases = {
-                "garbage": "not JSON",
-                "two-lines": "printed 2 lines",
-                "short-ns": "ns has 4 samples, expected 5",
-                "wrong-part": "part 2, expected 1",
-                "extra-key": "unknown key.*extra",
-                "no-stdout": "printed nothing",
+                "garbage": "line 1 is not a sample: 'fast'",
+                "debug-line": "line 1 is not a sample: 'debug print from process\\(\\)'",
+                "no-answer": "no `answer` block",
+                "too-few": "printed 4 samples, expected 5",
+                "too-many": "printed 6 samples, expected 5",
+                "no-stdout": "exited without printing `done`",
+                "no-done": "exited without printing `done`",
+                "short-answer": "exited without printing `done`",  # 6 bytes `3\ndone`, then EOF (stdin: EOF)
+                "park-before-done": "exited without printing `done`",
+                "after-done": "printed output after `done`: 'stray line after done'",
             }
             for mode, pattern in cases.items():
                 with self.subTest(mode=mode):
-                    env = {**os.environ, "FAKE_MODE": mode}
-                    r = subprocess.run([sys.executable, str(FAKE), "bench", "1", str(inp), "5"],
-                                       capture_output=True, text=True, env=env, timeout=30)
+                    r = self.fake("1", str(inp), "0", "5", "5", FAKE_MODE=mode)
                     self.assertEqual(r.returncode, 0, r.stderr)
-                    self.rejects(r.stdout, pattern, 1, 5)
+                    self.rejects(r.stdout, pattern, 5, 5)
+
+    def test_fake_harness_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = Path(tmp) / "input.txt"
+            inp.write_text("x\n")
+            r = self.fake("2", str(inp), "0", "3", "3")
+            self.assertEqual((r.returncode, r.stdout), (0, b"1000\n1000\n1000\nanswer 1\n9\ndone\n"))
+            r = self.fake("1", str(inp), "2500", "1", "10", FAKE_NS="1000")  # budget reached after 3 calls
+            self.assertEqual(self.parse(r.stdout, 1, 10), ([1000] * 3, "3"))
+            r = self.fake("1", str(inp), "0", "0", "100000")  # baseline: zero iterations, only `done`
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"done\n", b""))
+            for args in (("1", str(inp), "0", "6", "5"), ("3", str(inp), "0", "1", "1"), ("1", str(inp), "1", "1"),
+                         ("1", str(inp), "-1", "1", "1"), ("1", str(Path(tmp) / "missing"), "0", "1", "1")):
+                with self.subTest(args=args):
+                    r = self.fake(*args)
+                    self.assertEqual((r.returncode, r.stdout), (1, b""))
+
+
+PARKED_64_MIB = ("import sys; b = bytearray(64 * 1024 * 1024); b[::4096] = b'\\x01' * (len(b) // 4096); "
+                 "sys.stdout.write('answer 2\\nok\\ndone\\n'); sys.stdout.flush(); sys.stdin.readline()")
+
+
+class MemoryProbeTest(unittest.TestCase):
+    """_reap, _live_peak and _run_with_peak against real child processes."""
+
+    def popen(self, code: str, **kwargs: object) -> subprocess.Popen[bytes]:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
+        kwargs.setdefault("stdout", subprocess.DEVNULL)
+        return subprocess.Popen([sys.executable, "-c", code], **kwargs)  # type: ignore[call-overload]
+
+    def test_reap_keeps_exit_status(self) -> None:
+        proc = self.popen("import sys; sys.exit(3)")
+        handle = bd._open_process_handle(proc.pid)
+        try:
+            peak = bd._reap(proc, handle)
+        finally:
+            bd._close_process_handle(handle)
+        self.assertEqual(proc.returncode, 3)
+        if os.name != "nt":
+            self.assertIsNotNone(peak)
+            assert peak is not None
+            self.assertGreater(peak, 0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX: os.wait4")
+    def test_reap_after_someone_else_reaped(self) -> None:
+        proc = self.popen("import sys; sys.exit(7)")
+        proc.wait()
+        proc.returncode = None  # as if it were reaped behind Popen's back
+        with self.assertRaisesRegex(bd.BenchError, r"exit status unavailable \(child reaped elsewhere\)") as caught:
+            bd._reap(proc, None)
+        self.assertEqual(caught.exception.code, bd.EXIT_SOLUTION)
+
+    @unittest.skipUnless(LINUX, "VmHWM in /proc/<pid>/status")
+    def test_live_peak_of_a_parked_child(self) -> None:
+        proc = self.popen(PARKED_64_MIB, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            assert proc.stdout is not None and proc.stdin is not None
+            self.assertEqual(bd.read_bench_output(proc.stdout), bd.BenchOutput([], "ok"))
+            peak = bd._live_peak(proc.pid)
+            self.assertIsNotNone(peak)
+            assert peak is not None
+            self.assertGreaterEqual(peak, 60 * MIB)
+            self.assertIsNone(proc.poll())  # still parked
+            proc.stdin.write(b"\n")
+            proc.stdin.close()
+            self.assertEqual(proc.wait(timeout=30), 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+        self.assertIsNone(bd._live_peak(proc.pid))  # reaped: no status
+
+    @unittest.skipUnless(LINUX and shutil.which("sh"), "Linux, sh")
+    def test_live_peak_has_no_parent_floor(self) -> None:
+        # After exit, a child's ru_maxrss on Linux is at least this process's own RSS; VmHWM is not.
+        ballast = bytearray(64 * MIB)
+        ballast[::4096] = b"\x01" * (len(ballast) // 4096)
+        result = bd._run_with_peak(["sh", "-c", "echo done; read line"])
+        self.assertEqual((result.returncode, result.output), (0, bd.BenchOutput([], None)))
+        assert result.live is not None
+        self.assertLess(result.live, 32 * MIB)
+        assert result.reaped is not None
+        self.assertGreater(result.reaped, 64 * MIB)  # the after-exit value has this process as a floor
+        del ballast
+
+    def test_peak_of_a_64_mib_allocation(self) -> None:
+        result = bd._run_with_peak([sys.executable, "-c", PARKED_64_MIB])
+        self.assertEqual((result.returncode, result.stderr, result.error, result.trailing), (0, "", None, b""))
+        self.assertEqual(result.output, bd.BenchOutput([], "ok"))
+        peak = bd._platform_peak(result)
+        if peak is None:
+            self.skipTest("peak RSS unavailable on this platform")
+        self.assertGreaterEqual(peak, 60 * MIB)
+
+    def test_run_with_peak_without_done(self) -> None:
+        code = "import sys; sys.stdout.write('1\\n2'); sys.stderr.write('oops\\n'); sys.exit(5)"
+        result = bd._run_with_peak([sys.executable, "-c", code])
+        self.assertEqual((result.returncode, result.stderr, result.output), (5, "oops\n", None))
+        self.assertRegex(str(result.error), "exited without printing `done`")
+        self.assertEqual(result.consumed, b"1\n2")
+
+    def test_run_with_peak_drains_after_a_protocol_error(self) -> None:
+        # The bad line comes first; the harness then still prints `done` and parks: it must be released.
+        code = ("import sys; sys.stdout.write('oops\\n' + '1\\n' * 100000 + 'done\\n'); sys.stdout.flush(); "
+                "sys.stdin.readline()")
+        result = bd._run_with_peak([sys.executable, "-c", code])
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(str(result.error), "line 1 is not a sample: 'oops'")
+        self.assertTrue(result.trailing.endswith(b"done\n"))
+
+    def test_run_with_peak_no_park(self) -> None:
+        result = bd._run_with_peak([sys.executable, "-c", "print('done')"])
+        self.assertEqual((result.returncode, result.output, result.trailing), (0, bd.BenchOutput([], None), b""))
+
+    def test_watchdog_kills_a_child_stuck_before_done(self) -> None:
+        stuck = {
+            "parks without done": "import sys; print(1, flush=True); sys.stdin.readline()",
+            "done without newline": "import sys; sys.stdout.write('done'); sys.stdout.flush(); sys.stdin.readline()",
+            "parks without flushing": "import sys; sys.stdout.write('done\\n'); sys.stdin.readline()",
+            "answer shorter than N": "import sys; print('answer 9\\n3\\ndone', flush=True); sys.stdin.readline()",
+        }
+        for name, code in stuck.items():
+            with self.subTest(name):
+                start = time.monotonic()
+                result = bd._run_with_peak([sys.executable, "-c", code], timeout=0.5)
+                self.assertLess(time.monotonic() - start, 20)
+                self.assertTrue(result.timed_out)  # reported before whatever the truncated output says
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_watchdog_spares_a_conforming_child(self) -> None:
+        result = bd._run_with_peak([sys.executable, "-c", PARKED_64_MIB], timeout=60)
+        self.assertEqual((result.timed_out, result.returncode, result.error), (False, 0, None))
+
+    def test_keyboard_interrupt_kills_the_parked_child(self) -> None:
+        procs: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            proc = real_popen(*args, **kwargs)  # type: ignore[call-overload]
+            procs.append(proc)
+            return proc
+
+        with mock.patch.object(bd.subprocess, "Popen", side_effect=spy), \
+                mock.patch.object(bd, "read_bench_output", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                bd._run_with_peak([sys.executable, "-c", "import sys; sys.stdin.readline()"])
+        (proc,) = procs
+        self.assertIsNotNone(proc.returncode)
+        assert proc.stdin is not None
+        self.assertTrue(proc.stdin.closed)
+        if os.name != "nt":
+            with self.assertRaises(ChildProcessError):  # reaped: no child left behind
+                os.waitpid(proc.pid, os.WNOHANG)
+
+    def test_cannot_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(bd.BenchError, "cannot run ") as caught:
+                bd._run_with_peak([str(Path(tmp) / "no-such-solution")])
+        self.assertEqual(caught.exception.code, bd.EXIT_SOLUTION)
 
 
 class DriverTest(unittest.TestCase):
@@ -440,6 +624,16 @@ class DriverTest(unittest.TestCase):
             [sys.executable, str(BENCH_DAY), *args, "--", *cmd],
             cwd=self.sol, capture_output=True, text=True, encoding="utf-8", env=clean, timeout=120,
         )
+
+    def run_in_process(self, *args: str, **env: str) -> tuple[int, str, str]:
+        """bench_day.main in this process (so its helpers can be patched): exit code, stdout, stderr."""
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+        clean.update(FAKE_COUNTER=str(self.counter), **env)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, clean, clear=True), contextlib.chdir(self.sol), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = bd.main([*args, "--", sys.executable, str(FAKE)])
+        return code, out.getvalue(), err.getvalue()
 
     def calls(self) -> list[list[str]]:
         if not self.counter.exists():
@@ -491,23 +685,29 @@ class DriverTest(unittest.TestCase):
         self.assertEqual([p["part"] for p in parts], [1, 2])
         self.assertEqual([p["answer"] for p in parts], ["3", "9"])
         for p in parts:
-            self.assertEqual(
-                sorted(p), ["answer", "iterations", "ns", "part", "rss_delta_bytes", "wall", "warmup"]
-            )
-            self.assertEqual((p["iterations"], p["warmup"]), (20, 2))
+            self.assertEqual(sorted(p), ["answer", "iterations", "ns", "part", "rss_baseline_bytes",
+                                         "rss_delta_bytes", "rss_peak_bytes", "wall", "warmup"])
+            # The fake harness runs 20 iterations of 1 µs to fill the 20 µs budget; 2 are warmup.
+            self.assertEqual((p["iterations"], p["warmup"]), (18, 2))
             self.assertEqual(p["ns"], {"min": 1000, "median": 1000, "mean": 1000.0, "stddev": 0.0,
                                        "p99": 1000, "max": 1000})
-            self.assertEqual(p["rss_delta_bytes"], 4096)
+            baseline, peak = p["rss_baseline_bytes"], p["rss_peak_bytes"]
+            if peak is None:
+                self.assertEqual((baseline, p["rss_delta_bytes"]), (None, None))
+            else:
+                self.assertLessEqual(abs(peak - baseline), MIB)  # nothing allocated: same as the baseline
+                self.assertEqual(p["rss_delta_bytes"], peak - baseline)
             self.assertIsNone(p["wall"])
         inp = str((self.sol / "input.txt").resolve())
-        # Per part: run-mode check, calibration stage 1 and 2 (0.1 s / 1 µs, clamped), measured run.
+        # Per part: run-mode check, zero-iteration baseline (same buffer size), measured run.
         self.assertEqual(self.calls(), [
-            ["1"], ["bench", "1", inp, "1"], ["bench", "1", inp, "1000"], ["bench", "1", inp, "22"],
-            ["2"], ["bench", "2", inp, "1"], ["bench", "2", inp, "1000"], ["bench", "2", inp, "22"],
+            ["1"], ["bench", "1", inp, "0", "0", "100000"], ["bench", "1", inp, "20000", "10", "100000"],
+            ["2"], ["bench", "2", inp, "0", "0", "100000"], ["bench", "2", inp, "20000", "10", "100000"],
         ])
-        self.assertIn("part 1: ~1.00 µs/iter, running 20 (+2 warmup) iterations (~", r.stderr)
+        self.assertIn("part 1: benchmarking ~0.02 ms (10\u2013100000 iterations)\n", r.stderr)
+        self.assertIn("part 1: 20 iterations in 0.02 ms (2 warmup trimmed)\n", r.stderr)
         self.assertTrue(r.stdout.startswith("| Part | Min | Median |"), r.stdout)
-        self.assertIn("| 1 | 1.00 µs | 1.00 µs | 1.00 µs ± 0 ns | 1.00 µs | 20 | 4.00 KiB | n/a |", r.stdout)
+        self.assertIn("| 1 | 1.00 µs | 1.00 µs | 1.00 µs ± 0 ns | 1.00 µs | 18 | ", r.stdout)
         self.assertTrue(r.stdout.endswith("wrote bench.json\n"))
         self.assertNotIn("hyperfine not found", r.stderr)  # --no-hyperfine: no note
         # Atomic write leaves no temp file behind.
@@ -519,30 +719,34 @@ class DriverTest(unittest.TestCase):
         ns = self.bench_json()["parts"][0]["ns"]
         self.assertEqual((ns["min"], ns["max"], ns["mean"]), (100, 300, 200.0))
 
-    def test_calibration_uses_warm_median(self) -> None:
-        # Stage 1 sees the cold 5000 ns; stage 2 runs 1000 iterations whose warm median is 300 ns.
-        r = self.run_driver("--time", "0.0003", "--no-hyperfine", FAKE_NS="5000,300,300,300,300")
+    def test_explicit_warmup(self) -> None:
+        r = self.run_driver("--time", "0.00002", "--warmup", "5", "--no-hyperfine", FAKE_NS="1000")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("part 1: ~300 ns/iter, running 1000 (+100 warmup) iterations (~", r.stderr)
-        bench_sizes = [c[-1] for c in self.calls() if c[0] == "bench" and c[1] == "1"]
-        self.assertEqual(bench_sizes, ["1", "1000", "1100"])
+        self.assertEqual([(p["iterations"], p["warmup"]) for p in self.bench_json()["parts"]], [(15, 5), (15, 5)])
+        self.assertIn("part 2: 20 iterations in 0.02 ms (5 warmup trimmed)\n", r.stderr)
 
-    def test_slow_part_single_calibration_run(self) -> None:
-        r = self.run_driver("--no-hyperfine", FAKE_NS="100000000")
+    def test_slow_part_runs_min_iterations(self) -> None:
+        r = self.run_driver("--no-hyperfine", FAKE_NS="200000000")  # 0.2 s per call: the budget ends after 5
         self.assertEqual(r.returncode, 0, r.stderr)
-        for part in ("1", "2"):
-            bench_sizes = [c[-1] for c in self.calls() if c[0] == "bench" and c[1] == part]
-            self.assertEqual(bench_sizes, ["1", "11"])  # one calibration run, then N=10 (+1 warmup)
-        self.assertEqual([p["iterations"] for p in self.bench_json()["parts"]], [10, 10])
-        self.assertIn("part 1: ~100 ms/iter, running 10 (+1 warmup) iterations (~1.10 s)", r.stderr)
+        self.assertEqual([(p["iterations"], p["warmup"]) for p in self.bench_json()["parts"]], [(9, 1), (9, 1)])
+        self.assertIn("part 1: benchmarking ~1.00 s (10\u2013100000 iterations)\n", r.stderr)
+        self.assertIn("part 1: 10 iterations in 2.00 s (1 warmup trimmed)\n", r.stderr)
 
-    def test_iterations_skips_calibration(self) -> None:
+    def test_fixed_iterations(self) -> None:
         r = self.run_driver("--iterations", "7", "--no-hyperfine")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len([c for c in self.calls() if c[0] == "bench"]), 2)
-        self.assertTrue(all(c[-1] == "8" for c in self.calls() if c[0] == "bench"))  # 7 + warmup 1
+        inp = str((self.sol / "input.txt").resolve())
+        self.assertEqual([c for c in self.calls() if c[:2] == ["bench", "1"]],
+                         [["bench", "1", inp, "0", "0", "8"], ["bench", "1", inp, "0", "8", "8"]])  # 7 + warmup 1
         self.assertEqual([(p["iterations"], p["warmup"]) for p in self.bench_json()["parts"]], [(7, 1), (7, 1)])
         self.assertIn("part 1: running 7 (+1 warmup) iterations\n", r.stderr)
+        self.assertIn("part 1: 8 iterations in 0.01 ms (1 warmup trimmed)\n", r.stderr)
+
+    def test_single_fixed_iteration_has_no_warmup(self) -> None:
+        r = self.run_driver("--iterations", "1", "--no-hyperfine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[-3:] for c in self.calls() if c[:2] == ["bench", "1"]], [["0", "0", "1"], ["0", "1", "1"]])
+        self.assertEqual([(p["iterations"], p["warmup"]) for p in self.bench_json()["parts"]], [(1, 0), (1, 0)])
 
     @POSIX_ONLY
     def test_other_input_skips_run_check_and_hyperfine(self) -> None:
@@ -566,36 +770,130 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_solution_failures_exit_2(self) -> None:
-        r = self.run_driver("--no-hyperfine", FAKE_MODE="crash")
-        self.assert_failed(r, 2, "bench mode `")
-        self.assertIn("exit status 101:\nfake harness crashed", r.stderr)
+        r = self.run_driver("--time", "0.00002", "--no-hyperfine", FAKE_MODE="crash")
+        self.assert_failed(r, 2, f"bench mode `{shlex.join([sys.executable, str(FAKE)])} bench 1 ")
+        self.assertIn("20000 10 100000` failed with exit status 101:\nfake harness crashed", r.stderr)
+        self.assertNotIn("old harness", r.stderr)
         r = self.run_driver("--no-hyperfine", FAKE_MODE="run-crash")
         self.assert_failed(r, 2, "run mode `")
         self.assertIn("fake run mode crashed", r.stderr)
         r = self.run_driver("--no-hyperfine", cmd=[str(self.tmp / "no-such-solution")])
         self.assert_failed(r, 2, "cannot run ")
 
+    def test_old_harness_hint(self) -> None:
+        self.counter.unlink(missing_ok=True)
+        r = self.run_driver("--no-hyperfine", FAKE_MODE="old-harness")
+        self.assert_failed(r, 2, "bench mode `")
+        self.assertIn(" 0 0 100000` failed with exit status 1:\n"
+                      "usage: fake_harness.py bench <1|2> <input-path> <iterations>\n"
+                      "(old harness? regenerate the bench file from the template)\n", r.stderr)
+        inp = str((self.sol / "input.txt").resolve())
+        self.assertEqual(self.calls(), [["1"], ["bench", "1", inp, "0", "0", "100000"]])  # baseline fails fast
+
     def test_protocol_violations_exit_3(self) -> None:
         cases = {
-            "garbage": "part 1: bench mode output is not JSON",
-            "two-lines": "part 1: bench mode printed 2 lines",
-            "short-ns": "part 1: ns has 0 samples, expected 1",  # calibration stage 1
-            "wrong-part": "part 1: bench mode reported part 2, expected 1",
-            "extra-key": "part 1: bench mode output has unknown key(s): extra",
-            "no-stdout": "part 1: bench mode printed nothing",
+            "garbage": "part 1: bench mode output line 1 is not a sample: 'fast' (is process() printing something?)",
+            "debug-line": "part 1: bench mode output line 1 is not a sample: 'debug print from process()'",
+            "no-answer": "part 1: bench mode printed 20 sample(s) but no `answer` block",
+            "too-few": "part 1: bench mode printed 9 samples, expected between 10 and 30",
+            "too-many": "part 1: bench mode printed 31 samples, expected between 10 and 30",
+            "no-stdout": "part 1: bench mode exited without printing `done`",
+            "no-done": "part 1: bench mode exited without printing `done`",
+            "after-done": "part 1: bench mode printed output after `done`: 'stray line after done'",
+            "baseline-noise": "part 1: bench mode printed output with zero iterations: 'debug print from main()'",
         }
         for mode, message in cases.items():
             with self.subTest(mode=mode):
-                self.assert_failed(self.run_driver("--no-hyperfine", FAKE_MODE=mode), 3, message)
+                r = self.run_driver("--time", "0.00002", "--max-iterations", "30", "--no-hyperfine", FAKE_MODE=mode)
+                self.assert_failed(r, 3, message)
+                self.assertNotIn("old harness", r.stderr)
+
+    def test_crash_wins_over_malformed_output(self) -> None:
+        r = self.run_driver("--time", "0.00002", "--no-hyperfine", FAKE_MODE="garbage-crash")
+        self.assert_failed(r, 2, "bench mode `")
+        self.assertIn("failed with exit status 3", r.stderr)
+        self.assertNotIn("not a sample", r.stderr)
+
+    def test_watchdog_timeouts_exit_3(self) -> None:
+        for mode in ("park-before-done", "short-answer"):
+            with self.subTest(mode=mode):
+                start = time.monotonic()
+                r = self.run_driver("--time", "0.00002", "--timeout", "0.5", "--no-hyperfine", FAKE_MODE=mode)
+                self.assertLess(time.monotonic() - start, 30)
+                self.assert_failed(r, 3, "part 1: bench mode timed out after 0.5 s waiting for `done` (see --timeout)")
+
+    def test_baseline_watchdog(self) -> None:
+        with mock.patch.object(bd, "BASELINE_TIMEOUT_S", 0.5):
+            code, out, err = self.run_in_process("--no-hyperfine", FAKE_MODE="baseline-park")
+        self.assertEqual(code, 3, err)
+        self.assertIn("error: part 1: bench mode timed out after 0.5 s waiting for `done` "
+                      "(the zero-iteration baseline run)", err)
+        self.assertEqual(out, "")
+
+    def test_baseline_empty_line(self) -> None:
+        harness = ("import sys\n"
+                   "if sys.argv[1:2] != ['bench']: print(3)\n"
+                   "else: sys.stdout.write('\\ndone\\n'); sys.stdout.flush(); sys.stdin.readline()\n")
+        r = self.run_driver("--no-hyperfine", cmd=[sys.executable, "-c", harness])
+        self.assert_failed(r, 3, "part 1: bench mode printed output with zero iterations: an empty line (`")
+
+    def test_harness_that_does_not_park(self) -> None:
+        r = self.run_driver("--time", "0.00002", "--no-hyperfine", FAKE_MODE="no-park")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        parts = self.bench_json()["parts"]
+        self.assertEqual([p["iterations"] for p in parts], [18, 18])
+        for p in parts:  # whether the live read won the race against the exit varies; never a mix
+            if p["rss_delta_bytes"] is None:
+                self.assertEqual((p["rss_baseline_bytes"], p["rss_peak_bytes"]), (None, None))
+                self.assertIn(f"warning: part {p['part']}: harness did not park, Peak RSS Δ will be n/a", r.stderr)
+            else:
+                self.assertLessEqual(abs(p["rss_delta_bytes"]), MIB)
+
+    @unittest.skipUnless(LINUX and hasattr(os, "waitid"), "Linux live peaks")
+    def test_exit_without_parking_is_na(self) -> None:
+        real = bd._live_peak
+
+        def after_exit(pid: int) -> int | None:  # lose the race on purpose: read the zombie's status
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+            return real(pid)
+
+        with mock.patch.object(bd, "_live_peak", side_effect=after_exit):
+            code, out, err = self.run_in_process("--iterations", "3", "--no-hyperfine", FAKE_MODE="no-park")
+        self.assertEqual(code, 0, err)
+        for p in self.bench_json()["parts"]:
+            self.assertEqual((p["rss_baseline_bytes"], p["rss_peak_bytes"], p["rss_delta_bytes"]), (None, None, None))
+        self.assertEqual(err.count("harness did not park, Peak RSS Δ will be n/a"), 2)
+        self.assertIn("| 3 | n/a | n/a |", out)
+
+    @unittest.skipUnless(LINUX, "Linux live peaks")
+    def test_live_and_reaped_peaks_never_mix(self) -> None:
+        real, calls = bd._live_peak, []
+
+        def measured_missing(pid: int) -> int | None:
+            calls.append(pid)
+            return None if len(calls) % 2 == 0 else real(pid)  # baseline live, measured not
+
+        with mock.patch.object(bd, "_live_peak", side_effect=measured_missing):
+            code, out, err = self.run_in_process("--iterations", "3", "--no-hyperfine")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([p["rss_delta_bytes"] for p in self.bench_json()["parts"]], [None, None])
+        self.assertIn("warning: part 1: harness did not park", err)
+
+    def test_answer_ending_in_carriage_return(self) -> None:
+        r = self.run_driver("--iterations", "3", "--no-hyperfine", FAKE_ANSWER="abc\r")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([p["answer"] for p in self.bench_json()["parts"]], ["abc", "abc"])
 
     def test_answer_mismatch_exit_4(self) -> None:
-        r = self.run_driver("--no-hyperfine", FAKE_RUN_ANSWER="4")
+        r = self.run_driver("--no-hyperfine", "--iterations", "3", FAKE_RUN_ANSWER="4")
         self.assert_failed(r, 4, "answer mismatch: run mode printed '4', bench mode returned '3'")
 
-    def test_calibration_answer_mismatch_exit_4(self) -> None:
-        # Bench-mode calls: stage 1, stage 2, measured run.
-        r = self.run_driver("--no-hyperfine", FAKE_ANSWER_SEQ="3,3,4")
-        self.assert_failed(r, 4, "answer mismatch: calibration returned '3', measured run returned '4'")
+    def test_multi_line_answer(self) -> None:
+        answer = "#..\n.#.\n..#"
+        r = self.run_driver("--no-hyperfine", "--iterations", "3", FAKE_ANSWER=answer)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([p["answer"] for p in self.bench_json()["parts"]], [answer, answer])
 
     def test_usage_errors_exit_1(self) -> None:
         for args, message in [
@@ -604,6 +902,14 @@ class DriverTest(unittest.TestCase):
             (("--iterations", "0"), "argument --iterations: invalid positive integer value: '0'"),
             (("--time", "-1"), "argument --time: invalid positive number value: '-1'"),
             (("--min-iterations", "10", "--max-iterations", "5"), "--min-iterations is larger"),
+            (("--warmup", "10", "--min-iterations", "10"), "--warmup must be smaller than --min-iterations"),
+            (("--warmup", "10"), "--warmup must be smaller than --min-iterations"),
+            (("--time", "1e10"), "--time must be at most 9223372036 s"),
+            (("--max-iterations", "2147483648"), "--max-iterations must be at most 2147483647"),
+            (("--iterations", "2147483648"), "--iterations must be at most 2147483647"),
+            (("--iterations", "2147483647"), "--iterations plus warmup must be at most 2147483647"),
+            (("--iterations", "5", "--warmup", "2147483648"), "--warmup must be at most 2147483647"),
+            (("--timeout", "0"), "argument --timeout: invalid positive number value: '0'"),
         ]:
             with self.subTest(args=args):
                 r = subprocess.run([sys.executable, str(BENCH_DAY), *args], cwd=self.sol,
@@ -615,10 +921,25 @@ class DriverTest(unittest.TestCase):
         self.assert_failed(r, 1, "no command given after `--`")
 
     def test_rss_null_is_na(self) -> None:
-        r = self.run_driver("--iterations", "3", "--no-hyperfine", FAKE_RSS="null")
+        with mock.patch.object(bd, "_reap", side_effect=lambda proc, handle: (proc.wait(), None)[1]), \
+                mock.patch.object(bd, "_live_peak", return_value=None):
+            code, out, err = self.run_in_process("--iterations", "3", "--no-hyperfine")
+        self.assertEqual(code, 0, err)
+        for p in self.bench_json()["parts"]:
+            self.assertEqual((p["rss_baseline_bytes"], p["rss_peak_bytes"], p["rss_delta_bytes"]), (None, None, None))
+        self.assertIn("| 3 | n/a | n/a |", out)
+
+    def test_rss_delta_measures_allocation(self) -> None:
+        alloc = 64 * MIB
+        r = self.run_driver("--iterations", "3", "--no-hyperfine", FAKE_ALLOC_MIB="64")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([p["rss_delta_bytes"] for p in self.bench_json()["parts"]], [None, None])
-        self.assertIn("| 3 | n/a | n/a |", r.stdout)
+        for p in self.bench_json()["parts"]:
+            if p["rss_peak_bytes"] is None:
+                self.skipTest("peak RSS unavailable on this platform")
+            self.assertLess(p["rss_baseline_bytes"], p["rss_peak_bytes"])
+            self.assertGreaterEqual(p["rss_delta_bytes"], 0.9 * alloc)
+            self.assertEqual(p["rss_delta_bytes"], p["rss_peak_bytes"] - p["rss_baseline_bytes"])
+        self.assertRegex(r.stdout, r"\| 3 \| 6\d\.\d MiB \| n/a \|")
 
     def test_hyperfine_absent(self) -> None:
         r = self.run_driver("--iterations", "3")

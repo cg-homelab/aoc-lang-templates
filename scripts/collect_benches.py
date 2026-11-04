@@ -61,7 +61,8 @@ DEFAULT_TABLEMODE = "single"
 # Keys kept in benchmarks.json, per entry and per part; everything else (the answer!) is
 # dropped, both when merging a bench.json and when loading a hand-edited benchmarks.json.
 ENTRY_KEYS = ("benched_at", "system", "commit", "settings", "parts")
-PART_KEYS = ("part", "iterations", "warmup", "ns", "rss_delta_bytes", "wall")
+PART_KEYS = ("part", "iterations", "warmup", "ns", "rss_baseline_bytes", "rss_peak_bytes", "rss_delta_bytes",
+             "wall")
 NS_KEYS = ("min", "median", "mean", "stddev", "p99")
 
 HEADING = "# Benchmarks"
@@ -121,9 +122,10 @@ def validate_parts(parts: object) -> None:
         for key in NS_KEYS:
             if not _is_number(ns.get(key)) or ns[key] < 0:
                 raise ValueError(f"part {n}: ns.{key} is not a non-negative number")
-        rss = part.get("rss_delta_bytes")
-        if rss is not None and not _is_number(rss):
-            raise ValueError(f"part {n}: rss_delta_bytes is not a number or null")
+        for key in ("rss_baseline_bytes", "rss_peak_bytes", "rss_delta_bytes"):
+            rss = part.get(key)
+            if rss is not None and not _is_number(rss):
+                raise ValueError(f"part {n}: {key} is not a number or null")
         wall = part.get("wall")
         if wall is not None:
             if not isinstance(wall, dict) or not all(_is_number(wall.get(k), 1e9) for k in ("mean_s", "stddev_s")):

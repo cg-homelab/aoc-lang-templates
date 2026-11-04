@@ -1,8 +1,13 @@
 // In-process timing harness used by `just bench`. You never need to edit
-// this file: it calls Part1.Process / Part2.Process and prints one JSON line
-// (schema 1) for bench_day.py.
+// this file: it calls Part1.Process / Part2.Process and prints one line per
+// timed sample (ns), then, only if at least one sample was taken, a line
+// `answer <N>` (N = UTF-8 byte length of the answer) followed by the answer
+// and a newline, then a `done` line. After `done` it blocks on one stdin line
+// (newline or EOF) so the runner can read its peak RSS before it exits.
 //
-// Protocol: <cmd> bench <1|2> <input-path> <iterations>
+// Protocol: <cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>
+// Runs at least min-iter and at most max-iter iterations, stopping early once
+// budget-ns has elapsed (after min-iter is reached).
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -12,13 +17,16 @@ namespace Day__DAY__;
 
 public static class Bench
 {
-    private const string Usage = "usage: __NAME__ bench <1|2> <input-path> <iterations>";
+    private const string Usage =
+        "usage: __NAME__ bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>";
 
     public static int Run(string[] args)
     {
-        if (args.Length != 3 || (args[0] != "1" && args[0] != "2")
-            || !int.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out var iterations)
-            || iterations < 1)
+        if (args.Length != 5 || (args[0] != "1" && args[0] != "2")
+            || !ulong.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out var budgetNs)
+            || !int.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out var minIter)
+            || !int.TryParse(args[4], NumberStyles.None, CultureInfo.InvariantCulture, out var maxIter)
+            || maxIter < minIter)
         {
             Console.Error.WriteLine(Usage);
             return 1;
@@ -38,15 +46,16 @@ public static class Bench
             return 1;
         }
 
-        // Allocate and touch the sample buffer up front so its pages are not
-        // counted in the RSS delta.
-        var ns = new long[iterations];
+        // Allocate and touch the sample buffer up front, identically whether
+        // the loop runs zero or many times.
+        var ns = new long[maxIter];
         Array.Fill(ns, -1L);
-        var rssBefore = MaxRssBytes();
         var freq = Stopwatch.Frequency;
         string? first = null;
         long checksum = 0;
-        for (var i = 0; i < iterations; i++)
+        var i = 0;
+        var tLoop = Stopwatch.GetTimestamp();
+        while (i < minIter || (i < maxIter && ElapsedNs(tLoop, freq) < budgetNs))
         {
             var t0 = Stopwatch.GetTimestamp();
             var answer = Call(process, input);
@@ -61,74 +70,41 @@ public static class Bench
             {
                 Console.Error.WriteLine("bench: answer mismatch at iteration "
                     + i.ToString(CultureInfo.InvariantCulture)
-                    + ": got \"" + Escape(answer) + "\", want \"" + Escape(first) + "\"");
+                    + ": got \"" + answer + "\", want \"" + first + "\"");
                 return 1;
             }
+            i++;
         }
         GC.KeepAlive(checksum);
-        var rssAfter = MaxRssBytes();
 
-        var sb = new StringBuilder(96 + 12 * iterations);
-        sb.Append("{\"schema\":1,\"part\":").Append(part)
-          .Append(",\"iterations\":").Append(iterations.ToString(CultureInfo.InvariantCulture))
-          .Append(",\"ns\":[");
-        for (var i = 0; i < ns.Length; i++)
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = false };
+        for (var j = 0; j < i; j++)
         {
-            if (i > 0) sb.Append(',');
-            sb.Append(ns[i].ToString(CultureInfo.InvariantCulture));
+            output.Write(ns[j].ToString(CultureInfo.InvariantCulture));
+            output.Write('\n');
         }
-        sb.Append("],\"answer\":\"").Append(Escape(first!))
-          .Append("\",\"max_rss_before\":").Append(Json(rssBefore))
-          .Append(",\"max_rss_after\":").Append(Json(rssAfter))
-          .Append('}');
-        Console.Out.Write(sb.Append('\n').ToString());
-        Console.Out.Flush();
+        if (i > 0)
+        {
+            output.Write("answer ");
+            output.Write(Encoding.UTF8.GetByteCount(first!).ToString(CultureInfo.InvariantCulture));
+            output.Write('\n');
+            output.Write(first);
+            output.Write('\n');
+        }
+        output.Write("done\n");
+        output.Flush();
+        // Park until the runner has read our peak RSS; newline or EOF releases.
+        Console.In.ReadLine();
         return 0;
+    }
+
+    private static ulong ElapsedNs(long t0, long freq)
+    {
+        var dt = Stopwatch.GetTimestamp() - t0;
+        return (ulong)(dt / freq * 1_000_000_000L + (dt % freq) * 1_000_000_000L / freq);
     }
 
     // Not inlined so the JIT/AOT compiler cannot hoist or elide the call.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static string Call(Func<string, string> process, string input) => process(input);
-
-    /// <summary>JSON string body escaping (without the surrounding quotes).</summary>
-    public static string Escape(string s)
-    {
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s)
-        {
-            switch (c)
-            {
-                case '"': sb.Append("\\\""); break;
-                case '\\': sb.Append("\\\\"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                default:
-                    if (c < 0x20)
-                        sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
-                    else
-                        sb.Append(c);
-                    break;
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static string Json(long? v) =>
-        v.HasValue ? v.Value.ToString(CultureInfo.InvariantCulture) : "null";
-
-    // Peak working set in bytes; null when the platform does not report it.
-    private static long? MaxRssBytes()
-    {
-        try
-        {
-            using var self = Process.GetCurrentProcess();
-            var peak = self.PeakWorkingSet64;
-            return peak > 0 ? peak : null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
 }

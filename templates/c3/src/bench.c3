@@ -1,123 +1,124 @@
 // In-process timing harness used by `just bench`. You never need to edit
-// this file: it calls `part1::process` / `part2::process` and prints one
-// JSON line (schema 1) for `bench_day.py`.
+// this file: it calls `part1::process` / `part2::process` and prints the
+// samples for `bench_day.py` (harness protocol 2).
 //
-// Protocol: `<cmd> bench <1|2> <input-path> <iterations>`
+// Protocol: `<cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>`
+//
+// Runs `process` at least min-iter and at most max-iter times, stopping
+// after min-iter once budget-ns has elapsed since the loop started. Prints
+// one line per sample (nanoseconds, decimal), then, if at least one
+// iteration ran, a line `answer <N>` followed by exactly the N answer bytes
+// and a newline, then always a line `done`. It then waits for one line (or
+// EOF) on stdin before exiting, so the runner can read this process's peak
+// memory while it is still alive. Usage errors, unreadable input and answer
+// mismatches go to stderr with exit code 1, nothing on stdout, no wait.
 module aoc::bench;
 import std::io;
 import std::io::file;
 import std::time;
 import std::time::clock;
-import libc;
 import aoc::part1;
 import aoc::part2;
 
-struct Timeval { CLong tv_sec; CLong tv_usec; }
-struct Rusage { Timeval ru_utime; Timeval ru_stime; CLong ru_maxrss; CLong[13] rest; }
-extern fn CInt getrusage(CInt who, Rusage* usage);
 alias ProcessFn = fn String(Allocator, String);
-excuse UNAVAILABLE;
 
-// Appends the JSON-escaped body of `s` (without surrounding quotes) to `out`.
-fn void append_escaped(DString* out, String s)
+// Keep-alive sink: the summed answer lengths are stored here with a volatile
+// store after the loop, so the compiler cannot treat the answers as unused.
+usz bench_sink;
+
+// True when `s` is a non-empty run of ASCII digits (no sign, prefix or blanks).
+fn bool is_decimal(String s)
 {
-	foreach (c : s)
-	{
-		switch (c)
-		{
-			case '"': out.append("\\\"");
-			case '\\': out.append("\\\\");
-			case '\n': out.append("\\n");
-			case '\r': out.append("\\r");
-			case '\t': out.append("\\t");
-			default:
-				if (c < 0x20) { out.appendf("\\u%04x", c); } else { out.append(c); }
-		}
-	}
+	if (s.len == 0) return false;
+	foreach (c : s) if (c < '0' || c > '9') return false;
+	return true;
 }
 
-fn void escape_cases() @test
+fn void is_decimal_cases() @test
 {
-	String[*] input = { "plain", "a\"b", "a\\b", "a\nb", "a\rb", "a\tb", "\x01", "\x1f", "åß→" };
-	String[*] want = { "plain", "a\\\"b", "a\\\\b", "a\\nb", "a\\rb", "a\\tb", "\\u0001", "\\u001f", "åß→" };
-	foreach (i, s : input)
-	{
-		DString out = dstring::new(mem);
-		defer out.free();
-		append_escaped(&out, s);
-		test::eq(out.str_view(), want[i]);
-	}
+	test::eq(is_decimal("0"), true);
+	test::eq(is_decimal("1234567890"), true);
+	test::eq(is_decimal(""), false);
+	test::eq(is_decimal("-1"), false);
+	test::eq(is_decimal("+1"), false);
+	test::eq(is_decimal("0x10"), false);
+	test::eq(is_decimal(" 1"), false);
 }
 
-fn long? max_rss_bytes()
+// Writes the samples line by line through the libc-buffered stdout, then the
+// length-prefixed answer when there is one and the `done` line, and flushes
+// once at the end.
+fn void? write_output(File* out, ulong[] ns, String answer)
 {
-	$if env::POSIX && $$C_LONG_SIZE == 64:
-		Rusage ru;
-		if (getrusage(0, &ru) != 0 || ru.ru_maxrss < 0) return UNAVAILABLE~;
-		$if env::DARWIN:
-			return ru.ru_maxrss;
-		$else
-			return ru.ru_maxrss * 1024;
-		$endif
-	$else
-		return UNAVAILABLE~;
-	$endif
+	foreach (t : ns) io::fprintf(out, "%d\n", t)!;
+	if (ns.len > 0)
+	{
+		io::fprintf(out, "answer %d\n", answer.len)!;
+		out.write(answer)!;
+		out.write_byte('\n')!;
+	}
+	out.write("done\n")!;
+	out.flush()!;
 }
 
 fn int run(String[] args)
 {
-	String usage = "usage: __NAME__ bench <1|2> <input-path> <iterations>";
-	if (args.len != 3) { io::eprintn(usage); return 1; }
+	String usage = "usage: __NAME__ bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>";
+	if (args.len != 5) { io::eprintn(usage); return 1; }
 	String part = args[0];
 	if (part != "1" && part != "2") { io::eprintn(usage); return 1; }
-	uint iterations = args[2].to_uint() ?? 0;
-	if (iterations == 0) { io::eprintn(usage); return 1; }
+	if (!is_decimal(args[2]) || !is_decimal(args[3]) || !is_decimal(args[4])) { io::eprintn(usage); return 1; }
+	ulong? budget_ns = args[2].to_ulong();
+	uint? min_iter = args[3].to_uint();
+	uint? max_iter = args[4].to_uint();
+	if (catch budget_ns, min_iter, max_iter) { io::eprintn(usage); return 1; }
+	if (max_iter < min_iter) { io::eprintn(usage); return 1; }
 	char[]? loaded = file::load(mem, args[1]);
 	if (catch loaded) { io::eprintfn("bench: cannot read %s", args[1]); return 1; }
 	String input = (String)loaded;
 
 	// Resolve the part once so the selection is not inside the timed window.
 	ProcessFn process = part == "1" ? &part1::process : &part2::process;
-	// The ns array is allocated and touched before the RSS snapshot so its
-	// pages are not counted as growth caused by the solution. ru_maxrss is in
-	// kB on Linux and bytes on macOS; non-POSIX / non-LP64 targets give null.
-	ulong[] ns = mem::new_array(ulong, iterations);
+	// The sample buffer is allocated and touched before the loop, identically
+	// whether the loop then runs zero times (the runner's idle baseline) or
+	// many, so its pages cancel out of the runner's memory delta.
+	ulong[] ns = mem::new_array(ulong, max_iter);
 	foreach (&slot : ns) *slot = 0xFFFF_FFFF_FFFF_FFFF;
-	long? rss_before = max_rss_bytes();
 	String first;
 	usz checksum;
-	for (uint i = 0; i < iterations; i++)
+	uint i = 0;
+	Clock t_loop = clock::now();
+	while (i < min_iter || (i < max_iter && (ulong)t_loop.to_now() < budget_ns))
 	{
 		Clock t0 = clock::now();
 		String answer = process(mem, input);
 		NanoDuration elapsed = t0.mark();
 		ns[i] = (ulong)elapsed;
 		checksum += answer.len;
-		if (i == 0) { first = answer; continue; }
-		if (answer != first)
+		if (i == 0)
 		{
-			DString msg = dstring::new(mem);
-			msg.appendf("bench: answer mismatch at iteration %d: got \"", i);
-			append_escaped(&msg, answer);
-			msg.append("\", want \"");
-			append_escaped(&msg, first);
-			msg.append("\"");
-			io::eprintn(msg.str_view());
-			return 1;
+			first = answer;
 		}
-		free(answer);
+		else
+		{
+			if (answer != first)
+			{
+				io::eprintfn("bench: answer mismatch at iteration %d: got %s, want %s", i, answer, first);
+				return 1;
+			}
+			free(answer);
+		}
+		i++;
 	}
-	long? rss_after = max_rss_bytes();
-	DString out = dstring::new(mem);
-	out.appendf("{\"schema\":1,\"part\":%s,\"iterations\":%d,\"ns\":[", part, iterations);
-	foreach (i, t : ns) { if (i > 0) out.append(','); out.appendf("%d", t); }
-	out.append("],\"answer\":\"");
-	append_escaped(&out, first);
-	out.append("\",\"max_rss_before\":");
-	if (try b = rss_before) { out.appendf("%d", b); } else { out.append("null"); }
-	out.append(",\"max_rss_after\":");
-	if (try a = rss_after) { out.appendf("%d", a); } else { out.append("null"); }
-	out.append("}");
-	io::printn(out.str_view());
+	@volatile_store(bench_sink, checksum);
+	if (catch write_output(io::stdout(), ns[:i], first))
+	{
+		io::eprintn("bench: cannot write to stdout");
+		return 1;
+	}
+	// Park until the runner sends a line or closes stdin; content and errors
+	// are ignored.
+	String? line = io::readline(mem, io::stdin());
+	if (try line) free(line);
 	return 0;
 }

@@ -45,35 +45,52 @@ characters across lines) so everything passes right after scaffolding.
 The solution executable has two invocations, both run from the day directory:
 
 ```
-<cmd> 1|2                                      print the answer for input.txt
-<cmd> bench <part> <input-path> <iterations>   print one JSON line (schema 1)
+<cmd> 1|2                                                           print the answer for input.txt
+<cmd> bench <part> <input-path> <budget-ns> <min-iter> <max-iter>   print samples and answer
 ```
 
 Bench mode follows these rules (each template has a separate harness file,
 for example `bench.py` or `src/bench.rs`, that users never edit):
 
-- Read the whole file at `<input-path>` into memory before timing.
-- Time each `process()` call with the monotonic nanosecond clock, and compare
-  every answer with the first one (outside the timed window).
-- Record the max RSS before and after the loop, in bytes, or `null` where the
-  platform has no support.
-- Print exactly one JSON line and nothing else on stdout, then exit 0.
-- Exit 1 with a message on stderr for usage errors (part not 1 or 2,
-  iterations below 1), an unreadable input, or an answer mismatch.
+1. Validate before printing anything: part is 1 or 2, and `budget-ns`,
+   `min-iter` and `max-iter` are non-negative integers with
+   `max-iter >= min-iter`. A usage error or an unreadable input exits 1 with a
+   message on stderr and nothing on stdout.
+2. Read the whole file at `<input-path>` into memory. Allocate and touch the
+   sample buffer, sized `max-iter`, before the loop. It is identical in the
+   zero-iteration baseline run and the measured run, so it cancels out of the
+   memory delta.
+3. Loop `i = 0; while i < min_iter or (i < max_iter and now() - t_loop < budget_ns)`:
+   time one `process()` call with the monotonic nanosecond clock, compare its
+   answer with the first one (outside the timed window), then `i += 1`. With
+   `min-iter` 0 and `budget-ns` 0 the loop runs zero times. An answer mismatch
+   exits 1 with a message on stderr.
+4. Write through buffered stdout one line per sample (nanoseconds as a decimal
+   integer). Then, only if `i > 0`, a line `answer <N>`, where `N` is the
+   UTF-8 byte length of the answer without its trailing newline, followed by
+   exactly those `N` bytes and a newline. Then always a line `done`. Flush.
+5. Block until one line arrives on stdin (a newline or EOF both release it,
+   the content is ignored), then exit 0. Usage and input errors and answer
+   mismatches exit 1 before printing anything and do not park.
 
-| Field | Type | Rule |
-|---|---|---|
-| `schema` | int | Always `1` |
-| `part` | int | `1` or `2`, as requested |
-| `iterations` | int | As requested; equals `len(ns)` |
-| `ns` | int[] | Nanoseconds per `process()` call, in order, each `>= 0` |
-| `answer` | string | Exactly what `<cmd> <part>` prints, without the newline |
-| `max_rss_before` | int or null | Peak RSS in bytes before the loop |
-| `max_rss_after` | int or null | Peak RSS in bytes after the loop |
+Example output for three iterations and the answer `3`:
 
-No other keys are allowed. Diagnostics inside `process()` must go to stderr:
-anything extra on stdout breaks the JSON line and the driver rejects it.
-The harness does no warmup or iteration planning; `bench_day.py` does.
+```
+1532
+1498
+1501
+answer 1
+3
+done
+```
+
+Zero iterations print exactly `done`. When you run bench mode by hand you must
+supply stdin, for example `echo | <cmd> bench 1 input.txt 0 0 5`.
+
+There is no JSON and no memory measurement in the harness. Diagnostics inside
+`process()` must go to stderr: anything extra on stdout breaks the output and
+the driver rejects it. The harness does no warmup; `bench_day.py` discards the
+warmup samples and measures peak memory from the outside.
 
 ### Justfile variables
 
@@ -104,10 +121,11 @@ flags:
 
 | Flag | Meaning |
 |---|---|
-| `--time S` | Target measured time per part (default 1 s) |
-| `--min-iterations N`, `--max-iterations N` | Clamp for the iteration count (defaults 10 and 100000) |
-| `--iterations N` | Fixed iteration count, skips calibration |
-| `--warmup K` | Fixed number of discarded warmup iterations |
+| `--time S` | Time budget the harness fills per part (default 1 s, at most about 9.2e9 s) |
+| `--timeout S` | Kill the measured bench run if it has not printed `done` after S seconds (exit 3); off by default so slow solutions are never cut short |
+| `--min-iterations N`, `--max-iterations N` | Bounds for the iteration count the harness picks (defaults 10 and 100000, at most 2^31-1) |
+| `--iterations N` | N measured iterations (the driver asks the harness for N+K with budget 0) |
+| `--warmup K` | Fixed number of discarded warmup samples; must be smaller than `--min-iterations` |
 | `--input FILE` | Time against another input (skips the run-mode check and hyperfine). The result is written to `bench.json`, but `collect_benches.py` does not merge runs made with another input into `benchmarks.json` (the existing entry in `benchmarks.json` is kept); re-run `just bench` without `--input` to refresh |
 | `--no-hyperfine` | Skip the whole-process wall time |
 | `--json-out FILE` | Where to write the summary (default `bench.json`) |
@@ -115,15 +133,29 @@ flags:
 `bench_day.py` exits 0 on success, 1 on usage errors, 2 when the solution
 fails, 3 on a protocol violation and 4 on an answer mismatch.
 
-The driver calibrates in two stages: one iteration, and if that takes under
-0.1 s, a second calibration run of enough iterations to fill about 0.1 s,
-taking the median of the warm samples. It then picks N iterations to fill
-`--time`, clamped to [10, 100000], and a warmup K of N/10 clamped to [1, 100]
-whose samples are discarded. Per part it reports min, median, mean, stddev,
-p99 and max, the peak RSS delta, and, when hyperfine is installed, the
+Per part the driver runs the run-mode check (default input only), then a
+zero-iteration baseline run `bench <part> <input> 0 0 <max-iterations>`. Its
+peak RSS is the idle baseline. The driver cannot read it after the child
+exits, because on Linux a child's peak RSS reported after exit is floored at
+the parent's own RSS. Instead it reads the harness's own peak while the
+process is parked on stdin (`VmHWM` in `/proc/<pid>/status` on Linux,
+`PeakWorkingSetSize` on Windows, `ru_maxrss` from `wait4` on macOS), then
+releases it by writing a newline to its stdin. The zero-iteration baseline run always has a 60 s
+watchdog. A harness that exits without parking makes the driver report the
+memory columns as n/a with a warning, because on Linux it cannot mix the live
+peak with the after-exit counter.
+Then it runs the measured `bench <part> <input> <time in ns> <min-iterations>
+<max-iterations>`, and the harness decides how many iterations fit the budget.
+The driver discards the first K samples as warmup (K is N/10 clamped to
+[1, 100], and 0 when there is only one sample) and reports min, median, mean,
+stddev, p99 and max over the rest, the peak RSS delta (peak of the measured run
+minus peak of the baseline run) and, when hyperfine is installed, the
 whole-process wall time from `hyperfine -N --warmup 3`. Numbers under about
-1 µs mostly measure clock overhead, and the RSS delta is only indicative for
-garbage-collected runtimes.
+1 µs mostly measure clock overhead. The RSS delta compares two different
+processes, so expect small noise, and it is only indicative for
+garbage-collected runtimes. In `bench.json` (schema 1) each part carries
+`rss_baseline_bytes`, `rss_peak_bytes` and `rss_delta_bytes`, each an int or
+null.
 
 ## Solution directories
 
@@ -275,11 +307,13 @@ template, scaffolds day 1 into a scratch directory as `days/day-01-<lang>-v1`
 with the `setup-toolchains` action and checks the contract: `just test` passes,
 `just run 1`/`just run 2` print `3`/`9` for a three-line sample input, and
 `just bench` writes a valid `bench.json`. A `Harness protocol` step first runs
-`<solution> bench 1 input.txt 5` and `bench 2 input.txt 3` directly and checks
-that stdout is a single JSON line with exactly the contract's keys, the right
-part, iteration count and answer, and that zero iterations fails with empty
-stdout. The `Benchmark` step then checks `bench.json` (schema 1, parts 1 and 2,
-answers `3`/`9`, a hyperfine wall time, an integer RSS delta, all `ns`
+`<solution> bench 1 input.txt 200000000 5 5` and `bench 2 input.txt 200000000 3 3`
+directly and checks that stdout is exactly that many sample lines, then
+`answer 1`, the answer line and `done`, that zero iterations print exactly
+`done` (with stdin at EOF), that the harness parks until stdin is released,
+and that `min-iter > max-iter` fails with empty stdout. The `Benchmark` step
+then checks `bench.json` (schema 1, parts 1 and 2, answers `3`/`9`, a
+hyperfine wall time, integer RSS baseline, peak and delta, all `ns`
 statistics) and that no `bench.md` appears. It also checks that scaffolding
 left the checkout clean. It runs on pushes to `main`, pull requests and weekly, to
 catch toolchain churn.
@@ -328,7 +362,7 @@ justfile, pass `--tablemode` from `bench` and `bench-all`, run
 
 **v3.0.0 is breaking for consumers.** `just bench` writes `bench.json` through
 `bench_day.py` instead of hyperfine's `bench.md`, so every solution executable
-must implement `bench <part> <input> <iterations>` (see
+must implement a `bench` mode (see
 [Executable contract](#executable-contract)). `resolve_day.py` and
 `collect_benches.py` moved here from the year repo. Year repos must replace
 their root justfile and delete their own `scripts/`; see the year template's

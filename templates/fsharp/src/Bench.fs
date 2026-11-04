@@ -1,13 +1,20 @@
 module Day__DAY__.Bench
 
 // In-process timing harness used by `just bench`. You never need to edit
-// this file: it calls Part1.solve / Part2.solve and prints one JSON line
-// (schema 1) for bench_day.py.
+// this file: it calls Part1.solve / Part2.solve and prints one decimal
+// nanosecond sample per line, then (only if at least one iteration ran)
+// `answer <N>` (N = UTF-8 byte length of the answer) followed by the answer
+// and a newline, then always a `done` line. After `done` it flushes and
+// blocks on one stdin line (newline or EOF) so the runner can read this
+// process's peak RSS while it is still alive, then exits 0.
 //
-// Protocol: <cmd> bench <1|2> <input-path> <iterations>
+// Protocol: <cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>
 //
-// No printf/sprintf/failwithf here (not Native AOT friendly): StringBuilder,
-// `string` and Console.Out/Console.Error only.
+// Runs at least min-iter and at most max-iter iterations, continuing past
+// min-iter only while the elapsed loop time is below budget-ns.
+//
+// No printf/sprintf/failwithf here (not Native AOT friendly): `string`,
+// StreamWriter and Console.Error only.
 
 open System
 open System.Diagnostics
@@ -16,51 +23,29 @@ open System.IO
 open System.Runtime.CompilerServices
 open System.Text
 
-let private usage = "usage: __NAME__ bench <1|2> <input-path> <iterations>"
-
-/// JSON string body escaping (without the surrounding quotes).
-let escape (s: string) : string =
-    let sb = StringBuilder(s.Length)
-    for c in s do
-        match c with
-        | '"' -> sb.Append("\\\"") |> ignore
-        | '\\' -> sb.Append("\\\\") |> ignore
-        | '\n' -> sb.Append("\\n") |> ignore
-        | '\r' -> sb.Append("\\r") |> ignore
-        | '\t' -> sb.Append("\\t") |> ignore
-        | c when c < ' ' -> sb.Append("\\u").Append((int c).ToString("x4", CultureInfo.InvariantCulture)) |> ignore
-        | c -> sb.Append(c) |> ignore
-    sb.ToString()
-
-let private json (v: int64 option) : string =
-    match v with
-    | Some b -> b.ToString(CultureInfo.InvariantCulture)
-    | None -> "null"
-
-// Peak working set in bytes; None when the platform does not report it.
-let private maxRssBytes () : int64 option =
-    try
-        use self = Process.GetCurrentProcess()
-        let peak = self.PeakWorkingSet64
-        if peak > 0L then Some peak else None
-    with _ ->
-        None
+let private usage =
+    "usage: __NAME__ bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>"
 
 // Not inlined so neither the F# optimizer nor the AOT compiler can hoist or
 // elide the call.
 [<MethodImpl(MethodImplOptions.NoInlining)>]
 let private call (solve: string -> string) (input: string) : string = solve input
 
-let private parseIterations (s: string) : int option =
-    match Int32.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture) with
-    | true, n when n >= 1 -> Some n
+let private parseInt64 (s: string) : int64 option =
+    match Int64.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture) with
+    | true, n -> Some n
     | _ -> None
 
 let private usageError () : int =
     Console.Error.WriteLine usage
     1
 
-let private measure (part: string) (path: string) (iterations: int) : int =
+let private elapsedNs (t0: int64) : int64 =
+    let dt = Stopwatch.GetTimestamp() - t0
+    let freq = Stopwatch.Frequency
+    dt / freq * 1_000_000_000L + (dt % freq) * 1_000_000_000L / freq
+
+let private measure (part: string) (path: string) (budgetNs: int64) (minIter: int) (maxIter: int) : int =
     let solve: string -> string = if part = "1" then Part1.solve else Part2.solve
     let input =
         try
@@ -72,50 +57,50 @@ let private measure (part: string) (path: string) (iterations: int) : int =
         Console.Error.WriteLine("bench: cannot read " + path)
         1
     | Some input ->
-        // Allocate and touch the sample buffer up front so its pages are not
-        // counted in the RSS delta.
-        let ns = Array.create iterations -1L
-        let rssBefore = maxRssBytes ()
-        let freq = Stopwatch.Frequency
+        // Allocate and touch the sample buffer up front, identically whether
+        // the loop runs zero or many times.
+        let ns = Array.create maxIter -1L
         let mutable first: string = null
         let mutable checksum = 0L
         let mutable failed = false
         let mutable i = 0
-        while not failed && i < iterations do
+        let tLoop = Stopwatch.GetTimestamp()
+        while not failed && (i < minIter || (i < maxIter && elapsedNs tLoop < budgetNs)) do
             let t0 = Stopwatch.GetTimestamp()
             let answer = call solve input
-            let dt = Stopwatch.GetTimestamp() - t0
-            ns.[i] <- dt / freq * 1_000_000_000L + (dt % freq) * 1_000_000_000L / freq
+            ns.[i] <- elapsedNs t0
             checksum <- checksum + int64 answer.Length
             if isNull first then
                 first <- answer
             elif not (String.Equals(answer, first, StringComparison.Ordinal)) then
                 Console.Error.WriteLine(
                     "bench: answer mismatch at iteration " + string i
-                    + ": got \"" + escape answer + "\", want \"" + escape first + "\"")
+                    + ": got \"" + answer + "\", want \"" + first + "\"")
                 failed <- true
             i <- i + 1
         GC.KeepAlive(box checksum)
         if failed then
             1
         else
-            let rssAfter = maxRssBytes ()
-            let sb = StringBuilder(96 + 12 * iterations)
-            sb.Append("{\"schema\":1,\"part\":").Append(part)
-              .Append(",\"iterations\":").Append(string iterations)
-              .Append(",\"ns\":[").Append(String.Join(",", ns |> Array.map string))
-              .Append("],\"answer\":\"").Append(escape first)
-              .Append("\",\"max_rss_before\":").Append(json rssBefore)
-              .Append(",\"max_rss_after\":").Append(json rssAfter)
-              .Append("}\n") |> ignore
-            Console.Out.Write(sb.ToString())
-            Console.Out.Flush()
+            use out = new StreamWriter(Console.OpenStandardOutput(), UTF8Encoding(false), 65536, AutoFlush = false)
+            for k in 0 .. i - 1 do
+                out.Write(ns.[k].ToString(CultureInfo.InvariantCulture))
+                out.Write('\n')
+            if i > 0 then
+                out.Write("answer " + string (Encoding.UTF8.GetByteCount first) + "\n")
+                out.Write(first)
+                out.Write('\n')
+            out.Write("done\n")
+            out.Flush()
+            Console.In.ReadLine() |> ignore
             0
 
 let run (args: string[]) : int =
     match args with
-    | [| ("1" | "2") as part; path; iterationsArg |] ->
-        match parseIterations iterationsArg with
-        | Some iterations -> measure part path iterations
-        | None -> usageError ()
+    | [| ("1" | "2") as part; path; budgetArg; minArg; maxArg |] ->
+        match parseInt64 budgetArg, parseInt64 minArg, parseInt64 maxArg with
+        | Some budget, Some minIter, Some maxIter
+            when minIter <= maxIter && maxIter <= int64 Int32.MaxValue ->
+            measure part path budget (int minIter) (int maxIter)
+        | _ -> usageError ()
     | _ -> usageError ()

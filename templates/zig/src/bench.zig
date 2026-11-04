@@ -1,20 +1,29 @@
 //! In-process timing harness used by `just bench`. You never need to edit
-//! this file: it calls part1.process / part2.process and prints one JSON
-//! line (schema 1) for bench_day.py.
+//! this file: it calls part1.process / part2.process repeatedly and prints
+//! the per-call timings for bench_day.py.
 //!
-//! Protocol: <cmd> bench <1|2> <input-path> <iterations>
+//! Protocol: <cmd> bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>
+//!
+//! Runs at least min-iter and at most max-iter iterations, stopping early
+//! once budget-ns has elapsed since the loop started. stdout gets one line
+//! per iteration (nanoseconds, decimal); then, only if at least one
+//! iteration ran, `answer <N>` followed by exactly N bytes of answer and a
+//! newline; then always a line `done`. After `done` the harness waits for
+//! one line on stdin (newline or EOF) before exiting 0, so the runner can
+//! read this process's peak RSS while it is still alive. Usage errors,
+//! unreadable input and answer mismatches go to stderr with exit code 1,
+//! nothing on stdout and no wait.
 const std = @import("std");
-const builtin = @import("builtin");
 const part1 = @import("part1.zig");
 const part2 = @import("part2.zig");
 
-const usage = "usage: __NAME__ bench <1|2> <input-path> <iterations>\n";
+const usage = "usage: __NAME__ bench <1|2> <input-path> <budget-ns> <min-iter> <max-iter>\n";
 
 pub fn run(init: std.process.Init, args: []const []const u8) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
 
-    if (args.len != 3) {
+    if (args.len != 5) {
         std.debug.print(usage, .{});
         return 1;
     }
@@ -28,8 +37,19 @@ pub fn run(init: std.process.Init, args: []const []const u8) !u8 {
         std.debug.print(usage, .{});
         return 1;
     };
-    const iterations = std.fmt.parseInt(u32, args[2], 10) catch 0;
-    if (iterations == 0) {
+    const budget_ns = parseUnsigned(u64, args[2]) orelse {
+        std.debug.print(usage, .{});
+        return 1;
+    };
+    const min_iter = parseUnsigned(u32, args[3]) orelse {
+        std.debug.print(usage, .{});
+        return 1;
+    };
+    const max_iter = parseUnsigned(u32, args[4]) orelse {
+        std.debug.print(usage, .{});
+        return 1;
+    };
+    if (max_iter < min_iter) {
         std.debug.print(usage, .{});
         return 1;
     }
@@ -44,102 +64,70 @@ pub fn run(init: std.process.Init, args: []const []const u8) !u8 {
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer scratch.deinit();
     const scratch_allocator = scratch.allocator();
-    // Allocate and touch the sample buffer up front so its pages are not
-    // counted in the RSS delta.
-    const ns = try arena.alloc(u64, iterations);
+    // Allocate and touch the sample buffer up front, sized max-iter, so the
+    // process looks the same whether the loop runs zero times (the runner's
+    // idle baseline) or many times.
+    const ns = try arena.alloc(u64, max_iter);
     @memset(ns, std.math.maxInt(u64));
     var first: []const u8 = "";
     var checksum: usize = 0;
 
-    const rss_before = maxRssBytes();
-    for (ns, 0..) |*slot, i| {
-        // VERIFY in CI: Io.Timestamp.now(io, .awake) / durationTo /
-        // toNanoseconds (confirmed in the 0.17.0 std source, lib/std/Io.zig).
+    const t_loop = std.Io.Timestamp.now(io, .awake);
+    var i: u32 = 0;
+    while (i < min_iter or (i < max_iter and elapsedNs(io, t_loop) < budget_ns)) : (i += 1) {
         const t0 = std.Io.Timestamp.now(io, .awake);
         const answer = try process(scratch_allocator, input);
         const t1 = std.Io.Timestamp.now(io, .awake);
         std.mem.doNotOptimizeAway(answer.ptr);
-        slot.* = @intCast(t0.durationTo(t1).toNanoseconds());
+        ns[i] = @intCast(t0.durationTo(t1).toNanoseconds());
         checksum +%= answer.len;
         if (i == 0) {
             first = try arena.dupe(u8, answer);
         } else if (!std.mem.eql(u8, answer, first)) {
-            var err_buffer: [512]u8 = undefined;
-            var stderr = std.Io.File.stderr().writerStreaming(io, &err_buffer);
-            const ew = &stderr.interface;
-            try ew.print("bench: answer mismatch at iteration {d}: got \"", .{i});
-            try writeEscaped(ew, answer);
-            try ew.writeAll("\", want \"");
-            try writeEscaped(ew, first);
-            try ew.writeAll("\"\n");
-            try ew.flush();
+            std.debug.print("bench: answer mismatch at iteration {d}: got {s}, want {s}\n", .{ i, answer, first });
             return 1;
         }
         _ = scratch.reset(.retain_capacity);
     }
     std.mem.doNotOptimizeAway(checksum);
-    const rss_after = maxRssBytes();
 
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
     const w = &stdout.interface;
-    try w.print("{{\"schema\":1,\"part\":{s},\"iterations\":{d},\"ns\":[", .{ part, iterations });
-    for (ns, 0..) |t, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{d}", .{t});
-    }
-    try w.writeAll("],\"answer\":\"");
-    try writeEscaped(w, first);
-    try w.writeAll("\",\"max_rss_before\":");
-    try writeOptional(w, rss_before);
-    try w.writeAll(",\"max_rss_after\":");
-    try writeOptional(w, rss_after);
-    try w.writeAll("}\n");
+    for (ns[0..i]) |t| try w.print("{d}\n", .{t});
+    if (i > 0) try w.print("answer {d}\n{s}\n", .{ first.len, first });
+    try w.writeAll("done\n");
     try w.flush();
+
+    // Park until the runner sends a line or closes stdin; content and read
+    // errors are ignored.
+    var in_buffer: [64]u8 = undefined;
+    var stdin = std.Io.File.stdin().readerStreaming(io, &in_buffer);
+    while (stdin.interface.takeByte()) |c| {
+        if (c == '\n') break;
+    } else |_| {}
     return 0;
 }
 
-/// JSON string body escaping (without the surrounding quotes). Bytes >= 0x80
-/// pass through unchanged, so UTF-8 stays UTF-8.
-fn writeEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    const hex = "0123456789abcdef";
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
-            try w.writeAll("\\u00");
-            try w.writeByte(hex[c >> 4]);
-            try w.writeByte(hex[c & 0xf]);
-        },
-        else => try w.writeByte(c),
-    };
+/// Nanoseconds elapsed on the monotonic clock since `start`.
+fn elapsedNs(io: std.Io, start: std.Io.Timestamp) u64 {
+    const d = start.durationTo(std.Io.Timestamp.now(io, .awake)).toNanoseconds();
+    return if (d <= 0) 0 else @intCast(d);
 }
 
-fn writeOptional(w: *std.Io.Writer, v: ?u64) std.Io.Writer.Error!void {
-    if (v) |bytes| try w.print("{d}", .{bytes}) else try w.writeAll("null");
+/// Plain decimal digits only (no sign, no underscores), or null.
+fn parseUnsigned(comptime T: type, s: []const u8) ?T {
+    if (s.len == 0) return null;
+    for (s) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(T, s, 10) catch null;
 }
 
-/// Peak resident set size in bytes, or null where getrusage is unavailable.
-fn maxRssBytes() ?u64 {
-    // VERIFY in CI: std.posix.getrusage(std.posix.rusage.SELF).maxrss
-    // (confirmed in the 0.17.0 std source, lib/std/posix.zig).
-    if (comptime builtin.os.tag == .windows or !@hasDecl(std.posix.system, "getrusage")) {
-        return null;
-    } else {
-        const ru = std.posix.getrusage(std.posix.rusage.SELF);
-        if (ru.maxrss < 0) return null;
-        const maxrss: u64 = @intCast(ru.maxrss);
-        // Linux reports kilobytes, macOS bytes.
-        return if (comptime builtin.os.tag.isDarwin()) maxrss else maxrss * 1024;
-    }
-}
-
-test "writeEscaped" {
-    var buf: [64]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try writeEscaped(&w, "a\"b\\c\nd\re\tf\x01\x1fü");
-    try std.testing.expectEqualStrings("a\\\"b\\\\c\\nd\\re\\tf\\u0001\\u001fü", w.buffered());
+test "parseUnsigned" {
+    try std.testing.expectEqual(@as(?u32, 0), parseUnsigned(u32, "0"));
+    try std.testing.expectEqual(@as(?u32, 42), parseUnsigned(u32, "42"));
+    try std.testing.expectEqual(@as(?u32, null), parseUnsigned(u32, ""));
+    try std.testing.expectEqual(@as(?u32, null), parseUnsigned(u32, "-1"));
+    try std.testing.expectEqual(@as(?u32, null), parseUnsigned(u32, "+1"));
+    try std.testing.expectEqual(@as(?u32, null), parseUnsigned(u32, "1_0"));
+    try std.testing.expectEqual(@as(?u32, null), parseUnsigned(u32, "4294967296"));
 }
