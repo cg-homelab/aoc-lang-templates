@@ -21,12 +21,6 @@ static int failures = 0;
         }                                                                          \
     } while (0)
 
-static void check_escape(const char *in, const char *want) {
-    char *got = bench_json_escape(in);
-    CHECK_STR(got, want);
-    free(got);
-}
-
 int main(void) {
     char *ex1 = bench_read_file("example1.txt");
     char *ex2 = bench_read_file("example2.txt");
@@ -46,16 +40,6 @@ int main(void) {
     free(a2);
     free(ex1);
     free(ex2);
-
-    check_escape("plain", "plain");
-    check_escape("a\"b", "a\\\"b");
-    check_escape("a\\b", "a\\\\b");
-    check_escape("a\nb", "a\\nb");
-    check_escape("a\rb", "a\\rb");
-    check_escape("a\tb", "a\\tb");
-    check_escape("\x01", "\\u0001");
-    check_escape("\x1f", "\\u001f");
-    check_escape("åß→", "åß→");
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

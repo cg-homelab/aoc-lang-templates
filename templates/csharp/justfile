@@ -1,7 +1,7 @@
 # __NAME__ (.NET 10; bench uses a Native AOT publish)
 
 solution := "./out/__NAME__"
-scripts := env("AOC_SCRIPTS", "../../lang-templates/scripts")
+toolkit := env("AOC_TOOLKIT", "../../toolkit")
 
 build:
     dotnet publish src -c Release -o out
@@ -14,4 +14,4 @@ test:
 
 # In-process timing of both parts (+ hyperfine wall time if installed) -> bench.json
 bench *args: build
-    python3 "{{scripts}}/bench_day.py" --name __NAME__ {{args}} -- {{solution}}
+    uv run --quiet --frozen --no-dev --project "{{toolkit}}" aoc-toolkit bench --name __NAME__ {{args}} -- {{solution}}

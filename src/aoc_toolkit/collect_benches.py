@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Merge every days/day-NN-<lang>-vN/bench.json (written by bench_day.py) into
+"""Merge every days/day-NN-<lang>-vN/bench.json (written by `aoc-toolkit bench`) into
 benchmarks.json and render benchmarks.md from it.
 
-Usage: python3 lang-templates/scripts/collect_benches.py [--root DIR]
+Usage: aoc-toolkit collect [--root DIR]
            [--tablemode {single,ranking}]
 
 benchmarks.json at <root> (root defaults to the current directory) is the
@@ -33,9 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
-# Import the sibling modules even under `python -P` / PYTHONSAFEPATH.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bench_day import (  # noqa: E402
+from aoc_toolkit.bench_day import (
     DEFAULT_INPUT,
     NOT_AVAILABLE,
     SCHEMA,
@@ -51,7 +49,7 @@ from bench_day import (  # noqa: E402
     write_json_atomic,
     write_text_atomic,
 )
-from resolve_day import DIR_RE, solution_key  # noqa: E402
+from aoc_toolkit.resolve_day import DIR_RE, solution_key
 
 JSON_NAME = "benchmarks.json"
 MD_NAME = "benchmarks.md"
@@ -61,7 +59,8 @@ DEFAULT_TABLEMODE = "single"
 # Keys kept in benchmarks.json, per entry and per part; everything else (the answer!) is
 # dropped, both when merging a bench.json and when loading a hand-edited benchmarks.json.
 ENTRY_KEYS = ("benched_at", "system", "commit", "settings", "parts")
-PART_KEYS = ("part", "iterations", "warmup", "ns", "rss_delta_bytes", "wall")
+PART_KEYS = ("part", "iterations", "warmup", "ns", "rss_baseline_bytes", "rss_peak_bytes", "rss_delta_bytes",
+             "wall")
 NS_KEYS = ("min", "median", "mean", "stddev", "p99")
 
 HEADING = "# Benchmarks"
@@ -121,9 +120,10 @@ def validate_parts(parts: object) -> None:
         for key in NS_KEYS:
             if not _is_number(ns.get(key)) or ns[key] < 0:
                 raise ValueError(f"part {n}: ns.{key} is not a non-negative number")
-        rss = part.get("rss_delta_bytes")
-        if rss is not None and not _is_number(rss):
-            raise ValueError(f"part {n}: rss_delta_bytes is not a number or null")
+        for key in ("rss_baseline_bytes", "rss_peak_bytes", "rss_delta_bytes"):
+            rss = part.get(key)
+            if rss is not None and not _is_number(rss):
+                raise ValueError(f"part {n}: {key} is not a number or null")
         wall = part.get("wall")
         if wall is not None:
             if not isinstance(wall, dict) or not all(_is_number(wall.get(k), 1e9) for k in ("mean_s", "stddev_s")):
@@ -445,7 +445,7 @@ def render(doc: dict[str, Any], tablemode: str = DEFAULT_TABLEMODE) -> str:
 
 def build_parser() -> UsageArgumentParser:
     parser = UsageArgumentParser(
-        prog="collect_benches.py",
+        prog="aoc-toolkit collect",
         description="Merge days/*/bench.json into benchmarks.json and render benchmarks.md.",
     )
     parser.add_argument(

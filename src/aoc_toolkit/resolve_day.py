@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Resolve a `just run/test/bench` target to one solution directory under days/.
 
-Usage: python3 lang-templates/scripts/resolve_day.py [--root DIR] <target>
+Usage: aoc-toolkit resolve [--root DIR] <target>
 
 <target> is either a day number (`3`) or a solution directory name
 (`day-03-rust-v2`, optionally prefixed with `days/`). A day number with exactly
@@ -140,7 +140,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     """CLI entry point; an explicit root overrides --root (used by tests)."""
     parser = _ArgumentParser(
-        prog="resolve_day.py",
+        prog="aoc-toolkit resolve",
         usage="%(prog)s [--root DIR] <target>",
         description="Resolve a day number or solution directory name to days/<name>.",
     )

@@ -1,0 +1,27 @@
+[project]
+name = "aoc-toolkit"
+version = "5.0.0"
+description = "Advent of Code toolkit: language templates plus the aoc-toolkit CLI to scaffold, resolve, benchmark and collect solutions."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+aoc-toolkit = "aoc_toolkit.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<1.0.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# The classic ruff defaults, spelled out: ruff 0.17 widened its default rule set.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

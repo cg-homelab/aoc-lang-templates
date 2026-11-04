@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import collect_benches as cb
+import aoc_toolkit.collect_benches as cb
 
 SYSTEM = {"cpu": "Test CPU", "os": "TestOS 1 (arm64)"}
 FALLBACK_SYSTEM = {"cpu": "Collector CPU", "os": "CollectorOS 2 (x86_64)"}
@@ -27,6 +27,11 @@ def fallback() -> tuple[dict[str, str] | None, str | None]:
 
 # --- fixtures: bench.json documents ----------------------------------------
 
+# Sorted part keys of a merged entry: the answer and unknown keys are dropped.
+PUBLISHED_PART_KEYS = [
+    "iterations", "ns", "part", "rss_baseline_bytes", "rss_delta_bytes", "rss_peak_bytes", "wall", "warmup",
+]
+
 
 def bench_part(part: int, **overrides: object) -> dict[str, object]:
     data: dict[str, object] = {
@@ -35,6 +40,8 @@ def bench_part(part: int, **overrides: object) -> dict[str, object]:
         "iterations": 1000,
         "warmup": 100,
         "ns": {"min": 110, "median": 120, "mean": 123.0, "stddev": 5.2, "p99": 150, "max": 400},
+        "rss_baseline_bytes": 4_194_304,
+        "rss_peak_bytes": 4_194_304,
         "rss_delta_bytes": 0,
         "wall": dict(WALL),
     }
@@ -354,6 +361,8 @@ class MergeTest(RootTestCase):
             "day-06-rust-v1": json.dumps(bench_doc(bench_part(1, ns={"min": 1, "median": "fast"}))),
             "day-07-rust-v1": json.dumps(bench_doc(bench_part(1), bench_part(1))),
             "day-08-rust-v1": json.dumps(bench_doc(system="my laptop")),
+            "day-10-rust-v1": json.dumps(bench_doc(bench_part(1, rss_baseline_bytes="4 MiB"))),
+            "day-11-rust-v1": json.dumps(bench_doc(bench_part(1, rss_peak_bytes=[1]))),
         }
         for name, text in bad.items():
             self.day(name, text)
@@ -390,7 +399,7 @@ class MergeTest(RootTestCase):
         out, _ = self.merge(None)
         e = out["solutions"]["day-01-rust-v1"]
         self.assertEqual(sorted(e), ["benched_at", "commit", "parts", "settings", "system"])
-        self.assertEqual(sorted(e["parts"][0]), ["iterations", "ns", "part", "rss_delta_bytes", "wall", "warmup"])
+        self.assertEqual(sorted(e["parts"][0]), PUBLISHED_PART_KEYS)
 
     def test_other_input_keeps_entry_and_notes(self) -> None:
         self.day("day-01-rust-v1", bench_doc(input="example1.txt", benched_at="2027-01-01T00:00:00+00:00"))
@@ -544,7 +553,7 @@ class MainTest(CliTestCase):
         for e in json.loads(raw_json)["solutions"].values():
             self.assertEqual(sorted(e), ["benched_at", "commit", "parts", "settings", "system"])
             for p in e["parts"]:
-                self.assertEqual(sorted(p), ["iterations", "ns", "part", "rss_delta_bytes", "wall", "warmup"])
+                self.assertEqual(sorted(p), PUBLISHED_PART_KEYS)
 
     def test_idempotent(self) -> None:
         self.day("day-01-rust-v1", bench_doc())
@@ -670,7 +679,7 @@ class MainTest(CliTestCase):
                 with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
                     cb.main(argv, root=self.root)
                 self.assertEqual(cm.exception.code, 1)
-                self.assertIn("usage: collect_benches.py", err.getvalue())
+                self.assertIn("usage: aoc-toolkit collect", err.getvalue())
                 self.assertIn(message, err.getvalue())
         self.assertEqual(self.files(), (None, None))
 

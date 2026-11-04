@@ -1,7 +1,7 @@
-"""Tests for new_day.py.
+"""Tests for `aoc-toolkit new` (new_day.py).
 
 Each test builds a throwaway year repo in a temp dir with a copy of this repo
-nested at lang-templates/ (its own git repo, like a submodule checkout), so
+nested at toolkit/ (its own git repo, like a submodule checkout), so
 the tests exercise the git-tracked copy path without depending on what is
 committed or built in the working tree.
 """
@@ -20,10 +20,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "scripts"))
-import new_day  # noqa: E402
-from new_day import FALLBACK_IGNORE, git_env  # noqa: E402
+from aoc_toolkit import new_day
+from aoc_toolkit.new_day import FALLBACK_IGNORE, git_env
+
+REPO = Path(__file__).resolve().parents[1]
 
 LANGS = sorted(p.name for p in (REPO / "templates").iterdir() if p.is_dir())
 
@@ -39,10 +39,21 @@ def git(cwd: Path, *args: str) -> None:
 
 
 def copy_repo(dest: Path) -> None:
-    """Copy templates/ and scripts/ without build artifacts or local inputs."""
-    ignore = shutil.ignore_patterns(*FALLBACK_IGNORE)
+    """Copy templates/, src/ and pyproject.toml without build artifacts or local inputs."""
+    ignore = shutil.ignore_patterns(*FALLBACK_IGNORE, "__pycache__")
     shutil.copytree(REPO / "templates", dest / "templates", ignore=ignore)
-    shutil.copytree(REPO / "scripts", dest / "scripts", ignore=ignore)
+    shutil.copytree(REPO / "src", dest / "src", ignore=ignore)
+    shutil.copy2(REPO / "pyproject.toml", dest / "pyproject.toml")
+
+
+def new_cmd(*args: str) -> list[str]:
+    """`aoc-toolkit new` without uv; run it with toolkit_env so the copied package is imported."""
+    return [sys.executable, "-m", "aoc_toolkit", "new", *args]
+
+
+def toolkit_env(toolkit: Path, env: dict[str, str] | None = None) -> dict[str, str]:
+    """env (default: git_env()) with PYTHONPATH at the copy's src/, so its TEMPLATES is the one used."""
+    return {**(env or git_env()), "PYTHONPATH": str(toolkit / "src")}
 
 
 class NewDayTest(unittest.TestCase):
@@ -51,7 +62,7 @@ class NewDayTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         self.year = self.tmp / "year"
-        self.sub = self.year / "lang-templates"
+        self.sub = self.year / "toolkit"
         copy_repo(self.sub)
 
         # Synthetic template covering nested renames, binary and CRLF files.
@@ -71,14 +82,14 @@ class NewDayTest(unittest.TestCase):
         self,
         *args: str,
         cwd: Path | None = None,
-        script: Path | None = None,
+        toolkit: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         # stdin is never a terminal here, even when the suite runs in one.
         return subprocess.run(
-            [sys.executable, str(script or self.sub / "scripts" / "new_day.py"), *args],
+            new_cmd(*args),
             cwd=cwd or self.year,
-            env=env or git_env(),
+            env=toolkit_env(toolkit or self.sub, env),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -152,7 +163,7 @@ class NewDayTest(unittest.TestCase):
         env = {**git_env(), "GIT_CEILING_DIRECTORIES": str(self.tmp)}
         root = self.tmp / "fallback-year"
         result = self.scaffold(
-            "--root", str(root), "1", "rust", cwd=self.tmp, script=plain / "scripts" / "new_day.py", env=env
+            "--root", str(root), "1", "rust", cwd=self.tmp, toolkit=plain, env=env
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("warning: git unavailable", result.stderr)
@@ -275,7 +286,7 @@ class NewDayTest(unittest.TestCase):
                             self.assertNotIn(token, path.read_text(), path)
                 justfile = (day / "justfile").read_text()
                 self.assertIn(f"--name day-03-{lang}-v1", justfile)
-                self.assertIn('scripts := env("AOC_SCRIPTS"', justfile)
+                self.assertIn('toolkit := env("AOC_TOOLKIT"', justfile)
                 self.assertRegex(justfile, re.compile(r'^solution := "', re.M))
         cargo = (self.year / "days" / "day-03-rust-v1" / "Cargo.toml").read_text()
         self.assertIn('name = "day-03-rust-v1"', cargo)
@@ -389,14 +400,13 @@ class NewDayTest(unittest.TestCase):
 
     def test_closed_stdin(self) -> None:
         # fd 0 closed: sys.stdin is None in the child. Full arguments still work.
-        script = self.sub / "scripts" / "new_day.py"
         code = "import os, subprocess, sys; os.close(0); sys.exit(subprocess.call(sys.argv[1:]))"
         for args, status in ((("1", "php"), 0), (("php",), 1)):
             with self.subTest(args=args):
                 result = subprocess.run(
-                    [sys.executable, "-c", code, sys.executable, str(script), *args],
+                    [sys.executable, "-c", code, *new_cmd(*args)],
                     cwd=self.year,
-                    env=git_env(),
+                    env=toolkit_env(self.sub),
                     capture_output=True,
                     text=True,
                 )
@@ -429,9 +439,9 @@ class NewDayTest(unittest.TestCase):
             # Canonical-mode tty: the lines are buffered until the script reads them.
             os.write(primary, b"9\npython\n")
             result = subprocess.run(
-                [sys.executable, str(self.sub / "scripts" / "new_day.py")],
+                new_cmd(),
                 cwd=self.year,
-                env=git_env(),
+                env=toolkit_env(self.sub),
                 stdin=secondary,
                 capture_output=True,
                 text=True,
